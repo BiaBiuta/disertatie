@@ -1,0 +1,15 @@
+{
+    "execution_time_seconds": 8.73,
+    "total_initial_features": 5,
+    "selected_feature_count": 1,
+    "selected_features": [
+        "Flow Bytes/s"
+    ],
+    "chromosome": [
+        0,
+        0,
+        0,
+        1,
+        0
+    ]
+}

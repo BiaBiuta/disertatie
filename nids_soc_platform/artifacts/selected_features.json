@@ -1,0 +1,15 @@
+{
+    "features": [
+        "Total Fwd Packets",
+        "Fwd Packet Length Max",
+        "Flow IAT Mean",
+        "Flow IAT Max"
+    ],
+    "indices": [
+        2,
+        6,
+        16,
+        18
+    ],
+    "total_examined": 20
+}

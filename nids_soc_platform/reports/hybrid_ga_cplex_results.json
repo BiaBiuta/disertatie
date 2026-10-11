@@ -1,0 +1,32 @@
+{
+    "optimizer": "GA with CPLEX Fallback (Expanded Dataset)",
+    "execution_time_sec": 28.2,
+    "features_selected": [
+        "Total Fwd Packets",
+        "Fwd Packet Length Max",
+        "Flow IAT Mean",
+        "Flow IAT Max"
+    ],
+    "binary_chromosome": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0
+    ]
+}

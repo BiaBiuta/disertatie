@@ -1,0 +1,11 @@
+{
+    "engine": "Real-Time SOC Inference Engine (Phase 2)",
+    "total_flows_inspected": 39956,
+    "selected_features_count": 4,
+    "throughput_fps": 29120.92,
+    "average_latency_microseconds": 34.86,
+    "true_positives": 16119,
+    "false_positives": 4,
+    "recall_percent": 94.41,
+    "fpr_percent": 0.0175
+}

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <title>SOC NIDS - Rapoarte Performanță</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; }
+        .card { background-color: #1e293b; border-color: #334155; color: #f8fafc; }
+    </style>
+</head>
+<body class="p-4">
+    <div class="container">
+        <header class="d-flex justify-content-between align-items-center mb-4 pb-2 border-bottom border-secondary">
+            <h2 class="h4">Raport de Evaluare și Calibrare a Modelelor (Benchmark SOC)</h2>
+            <a href="/" class="btn btn-outline-info btn-sm">Înapoi la Dashboard Live</a>
+        </header>
+
+        <div class="row g-4">
+            <div class="col-md-6">
+                <div class="card p-3 shadow-sm h-100">
+                    <h5 class="card-title text-info mb-3">Curba ROC & Calibrare Prag</h5>
+                    <p class="text-secondary small">
+                        Performanța ansamblului (Suricata + Isolation Forest + PyTorch Autoencoder) pe datele de test din CIC-IDS2017.
+                    </p>
+                    <div class="text-center">
+                        <img src="/static/roc_curve_soc.png" class="img-fluid rounded border border-secondary" alt="Curba ROC">
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card p-3 shadow-sm h-100">
+                    <h5 class="card-title text-warning mb-3">Criterii SOC de Performanță</h5>
+                    <ul class="list-group list-group-flush bg-transparent">
+                        <li class="list-group-item bg-transparent text-light border-secondary">
+                            <strong>Constrângere critică:</strong> False Positive Rate (FPR) &le; 1.0% pentru prevenirea epuizării analiștilor.
+                        </li>
+                        <li class="list-group-item bg-transparent text-light border-secondary">
+<strong>Arhitectură:</strong> Filtrare secvențială (Reguli rapide în µs urmate de inferență ML doar pe traficul ambiguu).                        </li>
+                        <li class="list-group-item bg-transparent text-light border-secondary">
+                            <strong>Ansamblu ML:</strong> Mediere ponderată a scorului Isolation Forest și a erorii de reconstrucție a Autoencoder-ului.
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

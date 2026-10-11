@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <title>SOC NIDS Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <style>
+        body {
+            background-color: #0f172a;
+            color: #f8fafc;
+            overflow-x: hidden;
+        }
+        .card {
+            background-color: #1e293b;
+            border-color: #334155;
+            color: #f8fafc;
+        }
+        .table {
+            color: #e2e8f0;
+        }
+        .table-dark {
+            --bs-table-bg: #1e293b;
+            border-color: #334155;
+        }
+        .table-scroll-container {
+            max-height: 520px;
+            overflow-y: auto;
+        }
+        .table-scroll-container thead th {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background-color: #111827 !important;
+            border-bottom: 2px solid #475569;
+        }
+        .clickable-row {
+            cursor: pointer;
+            transition: background 0.15s ease-in-out;
+        }
+        .clickable-row:hover {
+            background-color: #334155 !important;
+        }
+        .table-scroll-container::-webkit-scrollbar { width: 8px; }
+        .table-scroll-container::-webkit-scrollbar-track { background: #1e293b; }
+        .table-scroll-container::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+    </style>
+</head>
+<body class="p-4">
+    <div class="container-fluid">
+        <header class="d-flex justify-content-between align-items-center mb-4 pb-2 border-bottom border-secondary">
+            <h2 class="h4">Live Intrusion Detection System (SOC Dashboard)</h2>
+            <span id="ws-badge" class="badge bg-warning">Conectare WebSocket...</span>
+
+            <div>
+                <a href="/reports/" class="btn btn-outline-info btn-sm me-2">Rapoarte & Metrică</a>
+                <span id="ws-badge" class="badge bg-warning">Conectare WebSocket...</span>
+            </div>
+        </header>
+
+        <!-- Contoare KPI SOC -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="card p-3 shadow-sm">
+                    <small class="text-secondary text-uppercase fw-bold">Fluxuri Totale</small>
+                    <h3 id="stat-total" class="mt-2 mb-0 text-info">0</h3>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3 shadow-sm border-danger">
+                    <small class="text-danger text-uppercase fw-bold">Semnături Suricata</small>
+                    <h3 id="stat-suricata" class="mt-2 mb-0 text-danger">0</h3>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3 shadow-sm border-warning">
+                    <small class="text-warning text-uppercase fw-bold">Anomalii ML / Zero-Day</small>
+                    <h3 id="stat-ml" class="mt-2 mb-0 text-warning">0</h3>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3 shadow-sm border-info">
+                    <small class="text-info text-uppercase fw-bold">FPR Țintă Calibrat</small>
+                    <h3 class="mt-2 mb-0 text-success">&le; 1.00%</h3>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabel cu Scroll Propriu -->
+        <div class="card shadow-sm">
+            <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                <span>Flux de Evenimente în Timp Real</span>
+                <small class="text-secondary">Click pe orice rând pentru analiză detaliată & răspuns</small>
+            </div>
+            <div class="card-body p-0 table-scroll-container">
+                <table class="table table-hover mb-0 text-center align-middle">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>Ora</th>
+                            <th>IP Sursă</th>
+                            <th>IP Dest</th>
+                            <th>Port</th>
+                            <th>Regulă Declansată</th>
+                            <th>Scor ML</th>
+                            <th>Scor Risc</th>
+                            <th>Severitate</th>
+                        </tr>
+                    </thead>
+                    <tbody id="alerts-tbody">
+                        {% for a in recent_alerts %}
+                        <tr class="clickable-row" onclick="inspectAlert({{ a.id }})">
+                            <td>{{ a.created_at|date:"H:i:s" }}</td>
+                            <td>{{ a.flow.src_ip }}</td>
+                            <td>{{ a.flow.dst_ip }}</td>
+                            <td><code>{{ a.flow.dst_port }}</code></td>
+                            <td><span class="badge bg-secondary">{{ a.rule_name }}</span></td>
+                            <td>{{ a.anomaly_score }}</td>
+                            <td><strong>{{ a.final_risk }}</strong></td>
+                            <td>
+                                <span class="badge {% if a.severity == 'CRITICAL' %}bg-danger{% elif a.severity == 'HIGH' %}bg-warning text-dark{% else %}bg-info{% endif %}">
+                                    {{ a.severity }}
+                                </span>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Investigare Incident SOC -->
+    <div class="modal fade" id="investigateModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content bg-dark text-white border-secondary">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title">Investigare Incident SOC #<span id="modal-alert-id"></span></h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <p class="mb-1 text-secondary">Timestamp: <strong id="modal-time" class="text-light"></strong></p>
+                            <p class="mb-1 text-secondary">IP Sursă: <span id="modal-src-ip" class="badge bg-primary fs-6"></span></p>
+                            <p class="mb-1 text-secondary">IP Destinație: <strong id="modal-dst-ip" class="text-light"></strong></p>
+                        </div>
+                        <div class="col-md-6">
+                            <p class="mb-1 text-secondary">Port / Protocol: <strong id="modal-port-proto" class="text-light"></strong></p>
+                            <p class="mb-1 text-secondary">Severitate: <span id="modal-severity" class="badge"></span></p>
+                            <p class="mb-1 text-secondary">Scor Risc Fuzionat: <strong id="modal-final-risk" class="text-warning fs-5"></strong></p>
+                        </div>
+                    </div>
+                    <hr class="border-secondary">
+                    <h6 class="text-info">Metadate Flux Rețea (Caracteristici CIC-IDS2017)</h6>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-bordered border-secondary text-light">
+                            <tbody>
+                                <tr><th>Durată Flux</th><td id="modal-flow-dur"></td><th>Rată Pachete/sec</th><td id="modal-flow-pps"></td></tr>
+                                <tr><th>Total Pachete Fwd</th><td id="modal-flow-fwd"></td><th>Total Pachete Bwd</th><td id="modal-flow-bwd"></td></tr>
+                                <tr><th>Rată Octeți/sec</th><td id="modal-flow-bps" colspan="3"></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+             <div class="modal-footer border-secondary justify-content-between">
+    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Închide</button>
+    <div class="d-flex gap-2">
+        <a id="btn-export-pdf" href="#" class="btn btn-outline-info">
+            Descărcare Raport PDF
+        </a>
+        <button type="button" id="btn-block-ip" class="btn btn-danger" onclick="triggerBlockIP()">
+            Blochează IP Sursă (Firewall Rule)
+        </button>
+    </div>
+</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
+        const socket = new WebSocket(`${wsScheme}://${window.location.host}/ws/alerts/`);
+        const modal = new bootstrap.Modal(document.getElementById('investigateModal'));
+
+        let currentInvestigatedIP = null;
+        let totalCount = 0;
+        let suricataCount = 0;
+        let mlCount = 0;
+
+        socket.onopen = () => {
+            const badge = document.getElementById('ws-badge');
+            badge.innerText = "WebSocket Conectat (Live)";
+            badge.className = "badge bg-success";
+        };
+
+        socket.onclose = () => {
+            const badge = document.getElementById('ws-badge');
+            badge.innerText = "Deconectat";
+            badge.className = "badge bg-danger";
+        };
+
+        socket.onmessage = (event) => {
+            const raw = JSON.parse(event.data);
+            const data = raw.payload ? raw.payload : raw;
+
+            totalCount++;
+            document.getElementById('stat-total').innerText = totalCount;
+
+            if (data.rule && !data.rule.includes("CLEAN") && !data.rule.includes("PASSED")) {
+                suricataCount++;
+                document.getElementById('stat-suricata').innerText = suricataCount;
+            } else if (data.severity === 'HIGH' || data.severity === 'CRITICAL') {
+                mlCount++;
+                document.getElementById('stat-ml').innerText = mlCount;
+            }
+
+            const tbody = document.getElementById('alerts-tbody');
+            const row = document.createElement('tr');
+            row.className = "clickable-row";
+            row.onclick = () => inspectAlert(data.id);
+
+            let badgeClass = 'bg-info';
+            if (data.severity === 'CRITICAL') badgeClass = 'bg-danger';
+            else if (data.severity === 'HIGH') badgeClass = 'bg-warning text-dark';
+
+            row.innerHTML = `
+                <td>${data.timestamp}</td>
+                <td>${data.src_ip}</td>
+                <td>${data.dst_ip}</td>
+                <td><code>${data.dst_port}</code></td>
+                <td><span class="badge bg-secondary">${data.rule}</span></td>
+                <td>${data.ml_score}</td>
+                <td><strong>${data.final_risk}</strong></td>
+                <td><span class="badge ${badgeClass}">${data.severity}</span></td>
+            `;
+
+            tbody.insertBefore(row, tbody.firstChild);
+        };
+
+       function inspectAlert(alertId) {
+    fetch(`/api/alert/${alertId}/`)
+        .then(res => res.json())
+        .then(data => {
+            // ... codul existent de populare modal ...
+            document.getElementById('modal-alert-id').innerText = data.id;
+            document.getElementById('modal-time').innerText = data.timestamp;
+            document.getElementById('modal-src-ip').innerText = data.flow_details.src_ip;
+            document.getElementById('modal-dst-ip').innerText = data.flow_details.dst_ip;
+            document.getElementById('modal-port-proto').innerText = `${data.flow_details.dst_port} / ${data.flow_details.protocol}`;
+
+            const sevBadge = document.getElementById('modal-severity');
+            sevBadge.innerText = data.severity;
+            sevBadge.className = 'badge ' + (data.severity === 'CRITICAL' ? 'bg-danger' : (data.severity === 'HIGH' ? 'bg-warning text-dark' : 'bg-info'));
+
+            document.getElementById('modal-final-risk').innerText = data.final_risk;
+            document.getElementById('modal-flow-dur').innerText = data.flow_details.duration + ' s';
+            document.getElementById('modal-flow-pps').innerText = data.flow_details.packets_per_sec;
+            document.getElementById('modal-flow-fwd').innerText = data.flow_details.fwd_pkts;
+            document.getElementById('modal-flow-bwd').innerText = data.flow_details.bwd_pkts;
+            document.getElementById('modal-flow-bps').innerText = data.flow_details.bytes_per_sec;
+
+            // ACTUALIZARE LINK PDF PENTRU ALERTA CURENTĂ:
+            document.getElementById('btn-export-pdf').href = `/api/alert/${data.id}/pdf/`;
+
+            currentInvestigatedIP = data.flow_details.src_ip;
+            modal.show();
+        })
+        .catch(err => console.error("Eroare la încărcarea detaliilor:", err));
+}
+
+        function triggerBlockIP() {
+            if (!currentInvestigatedIP) return;
+            fetch('/api/block-ip/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip: currentInvestigatedIP, reason: 'Manual block from incident triage' })
+            })
+            .then(res => res.json())
+            .then(resp => {
+                alert(`IP-ul ${currentInvestigatedIP} a fost adăugat în lista de blocare a firewall-ului!`);
+                modal.hide();
+            });
+        }
+    </script>
+</body>
+</html>
