@@ -49,10 +49,8 @@
     <div class="container-fluid">
         <header class="d-flex justify-content-between align-items-center mb-4 pb-2 border-bottom border-secondary">
             <h2 class="h4">Live Intrusion Detection System (SOC Dashboard)</h2>
-            <span id="ws-badge" class="badge bg-warning">Conectare WebSocket...</span>
-
-            <div>
-                <a href="/reports/" class="btn btn-outline-info btn-sm me-2">Rapoarte & Metrică</a>
+            <div class="d-flex align-items-center gap-2">
+                <a href="/reports/" class="btn btn-outline-info btn-sm">Rapoarte & Metrică</a>
                 <span id="ws-badge" class="badge bg-warning">Conectare WebSocket...</span>
             </div>
         </header>
@@ -62,25 +60,25 @@
             <div class="col-md-3">
                 <div class="card p-3 shadow-sm">
                     <small class="text-secondary text-uppercase fw-bold">Fluxuri Totale</small>
-                    <h3 id="stat-total" class="mt-2 mb-0 text-info">0</h3>
+                    <h3 id="stat-total" class="mt-2 mb-0 text-info">{{ initial_total|default:0 }}</h3>
                 </div>
             </div>
             <div class="col-md-3">
                 <div class="card p-3 shadow-sm border-danger">
                     <small class="text-danger text-uppercase fw-bold">Semnături Suricata</small>
-                    <h3 id="stat-suricata" class="mt-2 mb-0 text-danger">0</h3>
+                    <h3 id="stat-suricata" class="mt-2 mb-0 text-danger">{{ initial_suricata|default:0 }}</h3>
                 </div>
             </div>
             <div class="col-md-3">
                 <div class="card p-3 shadow-sm border-warning">
                     <small class="text-warning text-uppercase fw-bold">Anomalii ML / Zero-Day</small>
-                    <h3 id="stat-ml" class="mt-2 mb-0 text-warning">0</h3>
+                    <h3 id="stat-ml" class="mt-2 mb-0 text-warning">{{ initial_ml|default:0 }}</h3>
                 </div>
             </div>
             <div class="col-md-3">
                 <div class="card p-3 shadow-sm border-info">
                     <small class="text-info text-uppercase fw-bold">FPR Țintă Calibrat</small>
-                    <h3 class="mt-2 mb-0 text-success">&le; 1.00%</h3>
+                    <h3 class="mt-2 mb-0 text-success">&le; 0.05%</h3>
                 </div>
             </div>
         </div>
@@ -126,6 +124,33 @@
                 </table>
             </div>
         </div>
+        <!-- Panou Active Defense & Firewall Blocklist (SOAR / Containment) -->
+        <div class="card shadow-sm mt-4 border-danger">
+            <div class="card-header border-secondary d-flex justify-content-between align-items-center bg-dark">
+                <span class="text-danger fw-bold">
+                    <span class="badge bg-danger me-2">ACL Firewall</span> Reguli Active de Atenuare & Izolare (Active Mitigation)
+                </span>
+                <button class="btn btn-outline-secondary btn-sm" onclick="loadBlockedIPs()">Reîmprospătează Lista</button>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-hover mb-0 text-center align-middle">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>Adresă IP Izolată</th>
+                            <th>Motiv / Incident Sursă</th>
+                            <th>Timestamp Blocare</th>
+                            <th>Expirare (TTL)</th>
+                            <th>Acțiune Analist</th>
+                        </tr>
+                    </thead>
+                    <tbody id="blocked-ips-tbody">
+                        <tr>
+                            <td colspan="5" class="text-secondary py-3">Nicio regulă activă de blocare în acest moment.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <!-- Modal Investigare Incident SOC -->
@@ -161,17 +186,17 @@
                         </table>
                     </div>
                 </div>
-             <div class="modal-footer border-secondary justify-content-between">
-    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Închide</button>
-    <div class="d-flex gap-2">
-        <a id="btn-export-pdf" href="#" class="btn btn-outline-info">
-            Descărcare Raport PDF
-        </a>
-        <button type="button" id="btn-block-ip" class="btn btn-danger" onclick="triggerBlockIP()">
-            Blochează IP Sursă (Firewall Rule)
-        </button>
-    </div>
-</div>
+                <div class="modal-footer border-secondary justify-content-between">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Închide</button>
+                    <div class="d-flex gap-2">
+                        <a id="btn-export-pdf" href="#" class="btn btn-outline-info">
+                            Descărcare Raport PDF
+                        </a>
+                        <button type="button" id="btn-block-ip" class="btn btn-danger" onclick="triggerBlockIP()">
+                            Blochează IP Sursă (Firewall Rule)
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -183,9 +208,9 @@
         const modal = new bootstrap.Modal(document.getElementById('investigateModal'));
 
         let currentInvestigatedIP = null;
-        let totalCount = 0;
-        let suricataCount = 0;
-        let mlCount = 0;
+        let totalCount = parseInt(document.getElementById('stat-total').innerText) || 0;
+        let suricataCount = parseInt(document.getElementById('stat-suricata').innerText) || 0;
+        let mlCount = parseInt(document.getElementById('stat-ml').innerText) || 0;
 
         socket.onopen = () => {
             const badge = document.getElementById('ws-badge');
@@ -237,36 +262,34 @@
             tbody.insertBefore(row, tbody.firstChild);
         };
 
-       function inspectAlert(alertId) {
-    fetch(`/api/alert/${alertId}/`)
-        .then(res => res.json())
-        .then(data => {
-            // ... codul existent de populare modal ...
-            document.getElementById('modal-alert-id').innerText = data.id;
-            document.getElementById('modal-time').innerText = data.timestamp;
-            document.getElementById('modal-src-ip').innerText = data.flow_details.src_ip;
-            document.getElementById('modal-dst-ip').innerText = data.flow_details.dst_ip;
-            document.getElementById('modal-port-proto').innerText = `${data.flow_details.dst_port} / ${data.flow_details.protocol}`;
+        function inspectAlert(alertId) {
+            fetch(`/api/alert/${alertId}/`)
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('modal-alert-id').innerText = data.id;
+                    document.getElementById('modal-time').innerText = data.timestamp;
+                    document.getElementById('modal-src-ip').innerText = data.flow_details.src_ip;
+                    document.getElementById('modal-dst-ip').innerText = data.flow_details.dst_ip;
+                    document.getElementById('modal-port-proto').innerText = `${data.flow_details.dst_port} / ${data.flow_details.protocol}`;
 
-            const sevBadge = document.getElementById('modal-severity');
-            sevBadge.innerText = data.severity;
-            sevBadge.className = 'badge ' + (data.severity === 'CRITICAL' ? 'bg-danger' : (data.severity === 'HIGH' ? 'bg-warning text-dark' : 'bg-info'));
+                    const sevBadge = document.getElementById('modal-severity');
+                    sevBadge.innerText = data.severity;
+                    sevBadge.className = 'badge ' + (data.severity === 'CRITICAL' ? 'bg-danger' : (data.severity === 'HIGH' ? 'bg-warning text-dark' : 'bg-info'));
 
-            document.getElementById('modal-final-risk').innerText = data.final_risk;
-            document.getElementById('modal-flow-dur').innerText = data.flow_details.duration + ' s';
-            document.getElementById('modal-flow-pps').innerText = data.flow_details.packets_per_sec;
-            document.getElementById('modal-flow-fwd').innerText = data.flow_details.fwd_pkts;
-            document.getElementById('modal-flow-bwd').innerText = data.flow_details.bwd_pkts;
-            document.getElementById('modal-flow-bps').innerText = data.flow_details.bytes_per_sec;
+                    document.getElementById('modal-final-risk').innerText = data.final_risk;
+                    document.getElementById('modal-flow-dur').innerText = data.flow_details.duration + ' s';
+                    document.getElementById('modal-flow-pps').innerText = data.flow_details.packets_per_sec;
+                    document.getElementById('modal-flow-fwd').innerText = data.flow_details.fwd_pkts;
+                    document.getElementById('modal-flow-bwd').innerText = data.flow_details.bwd_pkts;
+                    document.getElementById('modal-flow-bps').innerText = data.flow_details.bytes_per_sec;
 
-            // ACTUALIZARE LINK PDF PENTRU ALERTA CURENTĂ:
-            document.getElementById('btn-export-pdf').href = `/api/alert/${data.id}/pdf/`;
+                    document.getElementById('btn-export-pdf').href = `/api/alert/${data.id}/pdf/`;
 
-            currentInvestigatedIP = data.flow_details.src_ip;
-            modal.show();
-        })
-        .catch(err => console.error("Eroare la încărcarea detaliilor:", err));
-}
+                    currentInvestigatedIP = data.flow_details.src_ip;
+                    modal.show();
+                })
+                .catch(err => console.error("Eroare la încărcarea detaliilor:", err));
+        }
 
         function triggerBlockIP() {
             if (!currentInvestigatedIP) return;
@@ -280,6 +303,76 @@
                 alert(`IP-ul ${currentInvestigatedIP} a fost adăugat în lista de blocare a firewall-ului!`);
                 modal.hide();
             });
+        }
+        // Încarcă regulile active de firewall la deschiderea paginii
+        document.addEventListener("DOMContentLoaded", () => {
+            loadBlockedIPs();
+        });
+
+        function loadBlockedIPs() {
+            fetch('/api/blocked-ips/')
+                .then(res => res.json())
+                .then(data => {
+                    const tbody = document.getElementById('blocked-ips-tbody');
+                    tbody.innerHTML = '';
+
+                    if (!data.blocked_ips || data.blocked_ips.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="5" class="text-secondary py-3">Nicio regulă activă de blocare în acest moment.</td></tr>';
+                        return;
+                    }
+
+                    data.blocked_ips.forEach(b => {
+                        const row = document.createElement('tr');
+                        row.innerHTML = `
+                            <td><span class="badge bg-danger fs-6">${b.ip}</span></td>
+                            <td class="text-light">${b.reason}</td>
+                            <td><code>${b.blocked_at}</code></td>
+                            <td><span class="badge bg-secondary">${b.expires_at}</span></td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-warning" onclick="triggerUnblockIP('${b.ip}')">
+                                    Deblochează
+                                </button>
+                            </td>
+                        `;
+                        tbody.appendChild(row);
+                    });
+                })
+                .catch(err => console.error("Eroare la încărcarea listei de blocare:", err));
+        }
+
+        function triggerBlockIP() {
+            if (!currentInvestigatedIP) return;
+            fetch('/api/block-ip/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    ip: currentInvestigatedIP,
+                    reason: 'Izolare automată / manuală din triaj incident',
+                    duration_minutes: 60
+                })
+            })
+            .then(res => res.json())
+            .then(resp => {
+                alert(`IP-ul ${currentInvestigatedIP} a fost adăugat în regulile de firewall!`);
+                modal.hide();
+                loadBlockedIPs();
+            })
+            .catch(err => alert("Eroare la blocare: " + err));
+        }
+
+        function triggerUnblockIP(ip) {
+            if (!confirm(`Sigur dorești să deblochezi IP-ul ${ip}?`)) return;
+            fetch('/api/unblock-ip/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip: ip })
+            })
+            .then(res => res.json())
+            .then(resp => {
+                alert(resp.message);
+                loadBlockedIPs();
+            })
+            .catch(err => alert("Eroare la deblocare: " + err));
         }
     </script>
 </body>

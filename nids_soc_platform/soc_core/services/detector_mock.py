@@ -1,52 +1,53 @@
 import os
+import json
 import joblib
 import numpy as np
+from django.conf import settings
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "calibrated_detector.pkl")
+# Folosim BASE_DIR direct din setările Django pentru rădăcina proiectului
+ARTIFACTS_DIR = os.path.join(settings.BASE_DIR, "artifacts")
 
-bundle = None
+MODEL_PATH = os.path.join(ARTIFACTS_DIR, "nids_model.joblib")
+SCALER_PATH = os.path.join(ARTIFACTS_DIR, "scaler.joblib")
+META_PATH = os.path.join(ARTIFACTS_DIR, "selected_features.json")
+
+# Încărcare tolerantă la erori
+model = None
+scaler = None
+SELECTED_FEATURES = []
+
 if os.path.exists(MODEL_PATH):
-    bundle = joblib.load(MODEL_PATH)
+    model = joblib.load(MODEL_PATH)
 
-def predict_anomaly(flow_dict: dict) -> tuple[float, bool]:
-    global bundle
-    if bundle is None:
-        if os.path.exists(MODEL_PATH):
-            bundle = joblib.load(MODEL_PATH)
-        else:
-            return 0.0, False
+if os.path.exists(SCALER_PATH):
+    scaler = joblib.load(SCALER_PATH)
 
-    iforest = bundle['iforest']
-    autoencoder = bundle['autoencoder']
-    scaler = bundle.get('scaler')
-    threshold = bundle['threshold']
+if os.path.exists(META_PATH):
+    with open(META_PATH, "r") as f:
+        meta = json.load(f)
+    SELECTED_FEATURES = meta.get("features", [])
+else:
+    print(f"[AVERTISMENT] Fișierul de metadate nu a fost găsit la: {META_PATH}")
 
-    features = np.array([[
-        float(flow_dict.get('flow_duration', 0.0)),
-        float(flow_dict.get('total_fwd_packets', 0)),
-        float(flow_dict.get('total_bwd_packets', 0)),
-        float(flow_dict.get('flow_bytes_per_sec', 0.0)),
-        float(flow_dict.get('flow_packets_per_sec', 0.0))
-    ]])
 
-    try:
-        if scaler is not None:
-            features = scaler.transform(features)
-
-        # 1. Scor Isolation Forest
-        score_if = float(iforest.decision_function(features)[0])
-        norm_if = 1 / (1 + np.exp(-score_if * 2))
-
-        # 2. Scor Autoencoder (eroare de reconstrucție)
-        score_ae = float(autoencoder.decision_function(features)[0])
-        norm_ae = 1 / (1 + np.exp(-score_ae * 2))
-
-        # 3. Fuziune ponderată
-        ensemble_score = round(0.5 * norm_if + 0.5 * norm_ae, 3)
-        is_above = bool(ensemble_score >= threshold)
-
-        return ensemble_score, is_above
-    except Exception as e:
-        print(f"Eroare inferență hibridă: {e}")
+def predict_anomaly(flow_data: dict):
+    """
+    Evaluează fluxul live folosind cele 4 trăsături optime selectate de GA + CPLEX.
+    """
+    if model is None or scaler is None or not SELECTED_FEATURES:
         return 0.0, False
+
+    feature_map = {
+        "Total Fwd Packets": float(flow_data.get("total_fwd_packets", 0)),
+        "Fwd Packet Length Max": float(flow_data.get("fwd_pkt_len_max", flow_data.get("flow_bytes_per_sec", 0) / 100)),
+        "Flow IAT Mean": float(flow_data.get("flow_iat_mean", flow_data.get("flow_duration", 0) / 2)),
+        "Flow IAT Max": float(flow_data.get("flow_iat_max", flow_data.get("flow_duration", 0)))
+    }
+
+    vector = np.array([[feature_map.get(feat, 0.0) for feat in SELECTED_FEATURES]])
+    vector_scaled = scaler.transform(vector)
+
+    prob = float(model.predict_proba(vector_scaled)[0, 1])
+    is_anomaly = prob >= 0.5
+
+    return round(prob, 3), is_anomaly

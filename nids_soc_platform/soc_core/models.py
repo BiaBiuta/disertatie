@@ -41,3 +41,28 @@ class BlockedIP(models.Model):
 
     def __str__(self):
         return f"{self.ip_address} ({self.reason})"
+from django.db import models
+from django.utils import timezone
+
+
+class BlockedIP(models.Model):
+    """Regulă de blocare firewall generată manual sau automat la triajul alertelor."""
+    ip_address = models.GenericIPAddressField(unique=True)
+    reason = models.CharField(max_length=255, default="Incident triage block")
+    blocked_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['-blocked_at']
+        verbose_name = "Blocked IP"
+        verbose_name_plural = "Blocked IPs"
+
+    def is_expired(self):
+        if self.expires_at and timezone.now() > self.expires_at:
+            return True
+        return False
+
+    def __str__(self):
+        status = "ACTIVE" if self.is_active and not self.is_expired() else "EXPIRED"
+        return f"{self.ip_address} [{status}] - {self.reason}"
