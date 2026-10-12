@@ -66,3 +66,41 @@ class BlockedIP(models.Model):
     def __str__(self):
         status = "ACTIVE" if self.is_active and not self.is_expired() else "EXPIRED"
         return f"{self.ip_address} [{status}] - {self.reason}"
+class InspectedArtifact(models.Model):
+    """Pastreaza rezultatele analizei statice asupra fisierelor asociate unui incident."""
+    alert = models.ForeignKey(SecurityAlert, on_delete=models.CASCADE, related_name='artifacts', null=True, blank=True)
+    file_name = models.CharField(max_length=255)
+    sha256 = models.CharField(max_length=64)
+    md5 = models.CharField(max_length=32, blank=True)
+    entropy = models.FloatField()
+    verdict = models.CharField(max_length=32)
+    file_risk_score = models.FloatField()
+    findings_json = models.TextField(default="[]")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.file_name} [{self.verdict}] - Entropie: {self.entropy}"
+class SOARActionLog(models.Model):
+    ACTION_CHOICES = [
+        ('FIREWALL_BLOCK', 'Firewall Block (Containment)'),
+        ('FIREWALL_UNBLOCK', 'Firewall Unblock (Release)'),
+        ('AUTO_CONTAINMENT', 'Autonomous SOAR Isolation'),
+        ('SANDBOX_ANALYSIS', 'Artifact Static Inspection'),
+        ('IOC_BLACKLIST', 'IOC Hash Blacklisted'),
+        ('RULE_EXPIRED', 'Firewall Rule Expired (TTL Cleanup)'),
+    ]
+
+    action_type = models.CharField(max_length=50, choices=ACTION_CHOICES)
+    target = models.CharField(max_length=255)  # Ex: IP-ul atacatorului sau numele fisierului
+    operator = models.CharField(max_length=100, default='SOC Analyst')
+    details = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"[{self.created_at.strftime('%H:%M:%S')}] {self.action_type} - {self.target}"

@@ -1,14 +1,54 @@
 <!DOCTYPE html>
+{% load static %}
 <html lang="ro">
 <head>
     <meta charset="UTF-8">
     <title>SOC NIDS Dashboard</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body {
             background-color: #0f172a;
             color: #f8fafc;
             overflow-x: hidden;
+        }
+        /* Layout Sidebar Stanga */
+        .sidebar {
+            width: 250px;
+            min-height: 100vh;
+            background-color: #111827;
+            border-right: 1px solid #334155;
+            position: fixed;
+            top: 0;
+            left: 0;
+            padding: 1.25rem 0.85rem;
+            z-index: 100;
+        }
+        .main-content {
+            margin-left: 250px;
+            padding: 1.25rem 1.5rem;
+            width: calc(100% - 250px);
+        }
+        .nav-link {
+            color: #94a3b8;
+            border-radius: 8px;
+            padding: 0.6rem 0.85rem;
+            margin-bottom: 0.3rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            transition: all 0.2s ease-in-out;
+            font-size: 0.9rem;
+        }
+        .nav-link:hover {
+            color: #38bdf8;
+            background-color: #1e293b;
+        }
+        .nav-link.active {
+            color: #ffffff;
+            background-color: #0284c7;
         }
         .card {
             background-color: #1e293b;
@@ -17,16 +57,23 @@
         }
         .table {
             color: #e2e8f0;
+            font-size: 0.85rem;
         }
         .table-dark {
             --bs-table-bg: #1e293b;
             border-color: #334155;
         }
-        .table-scroll-container {
-            max-height: 520px;
+        /* Tabele cu Scroll Dedicat */
+        .table-scroll-main {
+            height: calc(100vh - 250px);
             overflow-y: auto;
         }
-        .table-scroll-container thead th {
+        .table-scroll-firewall {
+            height: 220px;
+            overflow-y: auto;
+        }
+        .table-scroll-main thead th,
+        .table-scroll-firewall thead th {
             position: sticky;
             top: 0;
             z-index: 10;
@@ -40,118 +87,223 @@
         .clickable-row:hover {
             background-color: #334155 !important;
         }
-        .table-scroll-container::-webkit-scrollbar { width: 8px; }
-        .table-scroll-container::-webkit-scrollbar-track { background: #1e293b; }
-        .table-scroll-container::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        /* Stil Scrollbar subtil */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+        .kpi-pill {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 0.45rem 0.85rem;
+        }
+        /* Timeline Items */
+        .timeline-item {
+            border-left: 2px solid #38bdf8;
+            padding-left: 10px;
+            margin-bottom: 8px;
+            position: relative;
+        }
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -5px;
+            top: 4px;
+            width: 8px;
+            height: 8px;
+            background-color: #38bdf8;
+            border-radius: 50%;
+        }
     </style>
 </head>
-<body class="p-4">
-    <div class="container-fluid">
-        <header class="d-flex justify-content-between align-items-center mb-4 pb-2 border-bottom border-secondary">
-            <h2 class="h4">Live Intrusion Detection System (SOC Dashboard)</h2>
+<body>
+    <!-- Sidebar -->
+    {% include 'soc/sidebar.html' with active_page='dashboard' %}
+
+    <main class="main-content">
+        <!-- Header & KPI Bar Compact -->
+        <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom border-secondary">
+            <div class="d-flex align-items-center gap-3">
+                <h1 class="h5 mb-0 fw-bold">SOC Live Monitor</h1>
+                <span id="ws-badge" class="badge bg-warning">Conectare...</span>
+                <span class="badge bg-secondary" id="traffic-rate-badge">0 fluxuri/s</span>
+            </div>
+
+            <!-- Mini KPI Pills Orizontale -->
             <div class="d-flex align-items-center gap-2">
-                <a href="/reports/" class="btn btn-outline-info btn-sm">Rapoarte & Metrică</a>
-                <span id="ws-badge" class="badge bg-warning">Conectare WebSocket...</span>
-            </div>
-        </header>
-
-        <!-- Contoare KPI SOC -->
-        <div class="row g-3 mb-4">
-            <div class="col-md-3">
-                <div class="card p-3 shadow-sm">
-                    <small class="text-secondary text-uppercase fw-bold">Fluxuri Totale</small>
-                    <h3 id="stat-total" class="mt-2 mb-0 text-info">{{ initial_total|default:0 }}</h3>
+                <div class="kpi-pill d-flex align-items-center gap-2">
+                    <small class="text-secondary text-uppercase fw-bold" style="font-size: 0.7rem;">Fluxuri:</small>
+                    <span id="stat-total" class="fw-bold text-info">{{ initial_total|default:0 }}</span>
                 </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card p-3 shadow-sm border-danger">
-                    <small class="text-danger text-uppercase fw-bold">Semnături Suricata</small>
-                    <h3 id="stat-suricata" class="mt-2 mb-0 text-danger">{{ initial_suricata|default:0 }}</h3>
+                <div class="kpi-pill d-flex align-items-center gap-2 border-danger">
+                    <small class="text-danger text-uppercase fw-bold" style="font-size: 0.7rem;">Suricata:</small>
+                    <span id="stat-suricata" class="fw-bold text-danger">{{ initial_suricata|default:0 }}</span>
                 </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card p-3 shadow-sm border-warning">
-                    <small class="text-warning text-uppercase fw-bold">Anomalii ML / Zero-Day</small>
-                    <h3 id="stat-ml" class="mt-2 mb-0 text-warning">{{ initial_ml|default:0 }}</h3>
+                <div class="kpi-pill d-flex align-items-center gap-2 border-warning">
+                    <small class="text-warning text-uppercase fw-bold" style="font-size: 0.7rem;">Anomalii ML:</small>
+                    <span id="stat-ml" class="fw-bold text-warning">{{ initial_ml|default:0 }}</span>
                 </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card p-3 shadow-sm border-info">
-                    <small class="text-info text-uppercase fw-bold">FPR Țintă Calibrat</small>
-                    <h3 class="mt-2 mb-0 text-success">&le; 0.05%</h3>
+                <div class="kpi-pill d-flex align-items-center gap-2 border-success">
+                    <small class="text-success text-uppercase fw-bold" style="font-size: 0.7rem;">FPR Țintă:</small>
+                    <span class="fw-bold text-success">&le; 0.05%</span>
                 </div>
+                <a href="/sandbox/" class="btn btn-outline-info btn-sm ms-2">
+                    <i class="bi bi-shield-shaded me-1"></i> Sandbox
+                </a>
             </div>
         </div>
 
-        <!-- Tabel cu Scroll Propriu -->
-        <div class="card shadow-sm">
-            <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-                <span>Flux de Evenimente în Timp Real</span>
-                <small class="text-secondary">Click pe orice rând pentru analiză detaliată & răspuns</small>
+        <!-- LAYOUT COCKPIT (2 COLOANE PARALELE) -->
+        <div class="row g-3">
+            <!-- COLOANA STÂNGA: Tabelul Principal de Evenimente cu Bară de Filtrare & Control -->
+            <div class="col-xl-8 col-lg-7">
+                <div class="card shadow-sm h-100">
+                    <div class="card-header border-secondary py-2">
+                        <!-- Rând 1: Titlu și Controale Stream -->
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="fw-bold text-light small text-uppercase">
+                                <i class="bi bi-broadcast me-1 text-info"></i> Flux Evenimente Live
+                                <span id="stream-status-badge" class="badge bg-success ms-2" style="font-size: 0.65rem;">STREAM ACTIV</span>
+                            </span>
+                            <div class="d-flex align-items-center gap-2">
+                                <button id="btn-toggle-stream" class="btn btn-sm btn-outline-warning py-0 px-2" style="font-size: 0.75rem;" onclick="toggleStreamPause()">
+                                    <i class="bi bi-pause-fill me-1"></i> Pauză Stream
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary py-0 px-2" style="font-size: 0.75rem;" onclick="clearAlertsTable()">
+                                    <i class="bi bi-trash3 me-1"></i> Golește Feed
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Rând 2: Bara de Căutare Rapidă & Filtru Severitate -->
+                        <div class="row g-2 align-items-center">
+                            <div class="col-sm-8">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text bg-dark border-secondary text-secondary">
+                                        <i class="bi bi-search"></i>
+                                    </span>
+                                    <input type="text" id="filter-search-input" class="form-control bg-dark text-light border-secondary"
+                                           placeholder="Căutare rapidă (IP sursă, IP dest, port, regulă)..." onkeyup="applyTableFilters()">
+                                </div>
+                            </div>
+                            <div class="col-sm-4">
+                                <select id="filter-severity-select" class="form-select form-select-sm bg-dark text-light border-secondary" onchange="applyTableFilters()">
+                                    <option value="ALL">Toate Severitățile</option>
+                                    <option value="CRITICAL">Doar CRITICAL</option>
+                                    <option value="HIGH">Doar HIGH</option>
+                                    <option value="MEDIUM_INFO">INFO / MEDIUM</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card-body p-0 table-scroll-main">
+                        <table class="table table-hover mb-0 text-center align-middle">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th>Ora</th>
+                                    <th>IP Sursă</th>
+                                    <th>IP Dest</th>
+                                    <th>Port</th>
+                                    <th>Regulă</th>
+                                    <th>ML</th>
+                                    <th>Risc</th>
+                                    <th>Severitate</th>
+                                </tr>
+                            </thead>
+                            <tbody id="alerts-tbody">
+                                {% for a in recent_alerts %}
+                                <tr class="clickable-row" onclick="inspectAlert({{ a.id }})">
+                                    <td>{{ a.created_at|date:"H:i:s" }}</td>
+                                    <td><code class="text-info">{{ a.flow.src_ip }}</code></td>
+                                    <td>{{ a.flow.dst_ip }}</td>
+                                    <td><code>{{ a.flow.dst_port }}</code></td>
+                                    <td><span class="badge bg-secondary" style="font-size: 0.75rem;">{{ a.rule_name }}</span></td>
+                                    <td>{{ a.anomaly_score }}</td>
+                                    <td><strong>{{ a.final_risk }}</strong></td>
+                                    <td>
+                                        <span class="badge {% if a.severity == 'CRITICAL' %}bg-danger{% elif a.severity == 'HIGH' %}bg-warning text-dark{% else %}bg-info{% endif %}">
+                                            {{ a.severity }}
+                                        </span>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
-            <div class="card-body p-0 table-scroll-container">
-                <table class="table table-hover mb-0 text-center align-middle">
-                    <thead class="table-dark">
-                        <tr>
-                            <th>Ora</th>
-                            <th>IP Sursă</th>
-                            <th>IP Dest</th>
-                            <th>Port</th>
-                            <th>Regulă Declansată</th>
-                            <th>Scor ML</th>
-                            <th>Scor Risc</th>
-                            <th>Severitate</th>
-                        </tr>
-                    </thead>
-                    <tbody id="alerts-tbody">
-                        {% for a in recent_alerts %}
-                        <tr class="clickable-row" onclick="inspectAlert({{ a.id }})">
-                            <td>{{ a.created_at|date:"H:i:s" }}</td>
-                            <td>{{ a.flow.src_ip }}</td>
-                            <td>{{ a.flow.dst_ip }}</td>
-                            <td><code>{{ a.flow.dst_port }}</code></td>
-                            <td><span class="badge bg-secondary">{{ a.rule_name }}</span></td>
-                            <td>{{ a.anomaly_score }}</td>
-                            <td><strong>{{ a.final_risk }}</strong></td>
-                            <td>
-                                <span class="badge {% if a.severity == 'CRITICAL' %}bg-danger{% elif a.severity == 'HIGH' %}bg-warning text-dark{% else %}bg-info{% endif %}">
-                                    {{ a.severity }}
-                                </span>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+
+            <!-- COLOANA DREAPTĂ: Telemetrie Grafică & SOAR Playbooks -->
+            <div class="col-xl-4 col-lg-5 d-flex flex-column gap-3">
+                <!-- 1. Card Grafice & Audit SOAR Compact cu Tab-uri -->
+                <div class="card shadow-sm">
+                    <div class="card-header border-secondary d-flex justify-content-between align-items-center py-2">
+                        <span class="fw-bold text-info small text-uppercase">
+                            <i class="bi bi-shield-check me-1"></i> Operare & Răspuns SOAR
+                        </span>
+                        <ul class="nav nav-pills nav-fill gap-1" style="font-size: 0.75rem;" role="tablist">
+                            <li class="nav-item">
+                                <button class="btn btn-sm btn-outline-info active py-0 px-2" data-bs-toggle="pill" data-bs-target="#tab-timeline">Trafic</button>
+                            </li>
+                            <li class="nav-item">
+                                <button class="btn btn-sm btn-outline-warning py-0 px-2" data-bs-toggle="pill" data-bs-target="#tab-attacks">Atacuri</button>
+                            </li>
+                            <li class="nav-item">
+                                <button class="btn btn-sm btn-outline-success py-0 px-2" data-bs-toggle="pill" data-bs-target="#tab-audit" onclick="loadAuditLogs()">
+                                    <i class="bi bi-journal-text me-1"></i>Audit SOAR
+                                </button>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="card-body p-2 tab-content">
+                        <!-- Tab 1: Timeline -->
+                        <div class="tab-pane fade show active" id="tab-timeline" style="height: 180px; position: relative;">
+                            <canvas id="timelineChart"></canvas>
+                        </div>
+                        <!-- Tab 2: Doughnut -->
+                        <div class="tab-pane fade" id="tab-attacks" style="height: 180px; position: relative;">
+                            <canvas id="attackPieChart"></canvas>
+                        </div>
+                        <!-- Tab 3: Timeline Audit SOAR -->
+                        <div class="tab-pane fade" id="tab-audit" style="height: 180px; overflow-y: auto;">
+                            <div id="audit-log-container" class="small p-1">
+                                <span class="text-secondary">Se încarcă jurnalul de audit...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 2. Card Firewall ACL (Active Mitigation / SOAR) -->
+                <div class="card shadow-sm border-danger flex-grow-1">
+                    <div class="card-header border-secondary d-flex justify-content-between align-items-center bg-dark py-2">
+                        <span class="text-danger fw-bold small text-uppercase">
+                            <span class="badge bg-danger me-1">SOAR</span> ACL Firewall Activ
+                        </span>
+                        <button class="btn btn-outline-secondary btn-sm py-0 px-2" style="font-size: 0.75rem;" onclick="loadBlockedIPs()">
+                            <i class="bi bi-arrow-repeat"></i>
+                        </button>
+                    </div>
+                    <div class="card-body p-0 table-scroll-firewall">
+                        <table class="table table-hover mb-0 text-center align-middle">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th>IP Izolat</th>
+                                    <th>Motiv</th>
+                                    <th>Acțiune</th>
+                                </tr>
+                            </thead>
+                            <tbody id="blocked-ips-tbody">
+                                <tr>
+                                    <td colspan="3" class="text-secondary py-3">Nicio regulă activă de blocare.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </div>
-        <!-- Panou Active Defense & Firewall Blocklist (SOAR / Containment) -->
-        <div class="card shadow-sm mt-4 border-danger">
-            <div class="card-header border-secondary d-flex justify-content-between align-items-center bg-dark">
-                <span class="text-danger fw-bold">
-                    <span class="badge bg-danger me-2">ACL Firewall</span> Reguli Active de Atenuare & Izolare (Active Mitigation)
-                </span>
-                <button class="btn btn-outline-secondary btn-sm" onclick="loadBlockedIPs()">Reîmprospătează Lista</button>
-            </div>
-            <div class="card-body p-0">
-                <table class="table table-hover mb-0 text-center align-middle">
-                    <thead class="table-dark">
-                        <tr>
-                            <th>Adresă IP Izolată</th>
-                            <th>Motiv / Incident Sursă</th>
-                            <th>Timestamp Blocare</th>
-                            <th>Expirare (TTL)</th>
-                            <th>Acțiune Analist</th>
-                        </tr>
-                    </thead>
-                    <tbody id="blocked-ips-tbody">
-                        <tr>
-                            <td colspan="5" class="text-secondary py-3">Nicio regulă activă de blocare în acest moment.</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
+    </main>
 
     <!-- Modal Investigare Incident SOC -->
     <div class="modal fade" id="investigateModal" tabindex="-1" aria-hidden="true">
@@ -162,6 +314,7 @@
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
+                    <!-- Detalii Principale Incident -->
                     <div class="row mb-3">
                         <div class="col-md-6">
                             <p class="mb-1 text-secondary">Timestamp: <strong id="modal-time" class="text-light"></strong></p>
@@ -174,8 +327,33 @@
                             <p class="mb-1 text-secondary">Scor Risc Fuzionat: <strong id="modal-final-risk" class="text-warning fs-5"></strong></p>
                         </div>
                     </div>
-                    <hr class="border-secondary">
-                    <h6 class="text-info">Metadate Flux Rețea (Caracteristici CIC-IDS2017)</h6>
+
+                    <!-- CARD MITRE ATT&CK -->
+                    <div class="card bg-dark border-secondary p-3 mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2 pb-1 border-bottom border-secondary">
+                            <span class="text-warning fw-bold small text-uppercase">
+                                <i class="bi bi-diagram-3 me-1"></i> Cartografiere MITRE ATT&CK (Enterprise Matrix)
+                            </span>
+                            <span class="badge bg-danger" id="mitre-tech-id">T1046</span>
+                        </div>
+                        <div class="row g-2 small">
+                            <div class="col-md-4">
+                                <span class="text-secondary d-block">Tactică:</span>
+                                <strong class="text-info" id="mitre-tactic">-</strong>
+                            </div>
+                            <div class="col-md-4">
+                                <span class="text-secondary d-block">Tehnică Recunoscută:</span>
+                                <strong class="text-light" id="mitre-tech-name">-</strong>
+                            </div>
+                            <div class="col-md-4">
+                                <span class="text-secondary d-block">Sub-tehnică / Mod Operandi:</span>
+                                <span class="text-light" id="mitre-subtech">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Metadate Flux Retea -->
+                    <h6 class="text-info small text-uppercase fw-bold mb-2">Metadate Flux Rețea (CIC-IDS2017)</h6>
                     <div class="table-responsive">
                         <table class="table table-sm table-bordered border-secondary text-light">
                             <tbody>
@@ -189,9 +367,7 @@
                 <div class="modal-footer border-secondary justify-content-between">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Închide</button>
                     <div class="d-flex gap-2">
-                        <a id="btn-export-pdf" href="#" class="btn btn-outline-info">
-                            Descărcare Raport PDF
-                        </a>
+                        <a id="btn-export-pdf" href="#" class="btn btn-outline-info">Descărcare Raport PDF</a>
                         <button type="button" id="btn-block-ip" class="btn btn-danger" onclick="triggerBlockIP()">
                             Blochează IP Sursă (Firewall Rule)
                         </button>
@@ -212,9 +388,171 @@
         let suricataCount = parseInt(document.getElementById('stat-suricata').innerText) || 0;
         let mlCount = parseInt(document.getElementById('stat-ml').innerText) || 0;
 
+        // --- STARE CONTROL STREAM & FILTRARE ---
+        let isStreamPaused = false;
+
+        function toggleStreamPause() {
+            isStreamPaused = !isStreamPaused;
+            const btn = document.getElementById('btn-toggle-stream');
+            const badge = document.getElementById('stream-status-badge');
+
+            if (isStreamPaused) {
+                btn.innerHTML = `<i class="bi bi-play-fill me-1"></i> Reia Stream`;
+                btn.className = "btn btn-sm btn-outline-success py-0 px-2";
+                badge.innerText = "STREAM ÎN PAUZĂ";
+                badge.className = "badge bg-warning text-dark ms-2";
+            } else {
+                btn.innerHTML = `<i class="bi bi-pause-fill me-1"></i> Pauză Stream`;
+                btn.className = "btn btn-sm btn-outline-warning py-0 px-2";
+                badge.innerText = "STREAM ACTIV";
+                badge.className = "badge bg-success ms-2";
+            }
+        }
+
+        function clearAlertsTable() {
+            if (confirm("Sigur dorești să golești feed-ul vizual de evenimente?")) {
+                document.getElementById('alerts-tbody').innerHTML = '';
+            }
+        }
+
+        function applyTableFilters() {
+            const query = document.getElementById('filter-search-input').value.toLowerCase().trim();
+            const severityFilter = document.getElementById('filter-severity-select').value;
+            const rows = document.querySelectorAll('#alerts-tbody tr');
+
+            rows.forEach(row => {
+                const text = row.innerText.toLowerCase();
+                const matchesQuery = !query || text.includes(query);
+
+                let matchesSeverity = true;
+                if (severityFilter !== 'ALL') {
+                    if (severityFilter === 'CRITICAL') {
+                        matchesSeverity = text.includes('critical');
+                    } else if (severityFilter === 'HIGH') {
+                        matchesSeverity = text.includes('high');
+                    } else if (severityFilter === 'MEDIUM_INFO') {
+                        matchesSeverity = text.includes('info') || text.includes('medium') || text.includes('low');
+                    }
+                }
+
+                if (matchesQuery && matchesSeverity) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+
+        // INITIALIZARE CHART.JS
+        const maxPoints = 20;
+        const timelineLabels = Array(maxPoints).fill('');
+        const totalFlowsData = Array(maxPoints).fill(0);
+        const anomalyFlowsData = Array(maxPoints).fill(0);
+
+        let incomingFlowsCounter = 0;
+        let incomingAnomaliesCounter = 0;
+
+        const ctxTimeline = document.getElementById('timelineChart').getContext('2d');
+        const timelineChart = new Chart(ctxTimeline, {
+            type: 'line',
+            data: {
+                labels: timelineLabels,
+                datasets: [
+                    {
+                        label: 'Fluxuri/s',
+                        data: totalFlowsData,
+                        borderColor: '#38bdf8',
+                        backgroundColor: 'rgba(56, 189, 248, 0.15)',
+                        fill: true,
+                        tension: 0.3,
+                        borderWidth: 2,
+                        pointRadius: 0
+                    },
+                    {
+                        label: 'Anomalii',
+                        data: anomalyFlowsData,
+                        borderColor: '#ef4444',
+                        backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                        fill: true,
+                        tension: 0.3,
+                        borderWidth: 2,
+                        pointRadius: 1
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: { display: false },
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: '#334155' },
+                        ticks: { color: '#94a3b8', font: { size: 9 } }
+                    }
+                },
+                plugins: {
+                    legend: { labels: { color: '#e2e8f0', boxWidth: 10, font: { size: 10 } } }
+                }
+            }
+        });
+
+        const attackCategories = {
+            'DoS/DDoS': 0,
+            'PortScan': 0,
+            'Web Attack': 0,
+            'BruteForce': 0,
+            'Zero-Day': 0
+        };
+
+        const ctxPie = document.getElementById('attackPieChart').getContext('2d');
+        const attackPieChart = new Chart(ctxPie, {
+            type: 'doughnut',
+            data: {
+                labels: Object.keys(attackCategories),
+                datasets: [{
+                    data: [1, 1, 1, 1, 1],
+                    backgroundColor: ['#ef4444', '#f59e0b', '#3b82f6', '#8b5cf6', '#10b981'],
+                    borderWidth: 1,
+                    borderColor: '#1e293b'
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'bottom', labels: { color: '#cbd5e1', boxWidth: 8, font: { size: 9 } } }
+                },
+                cutout: '60%'
+            }
+        });
+
+        setInterval(() => {
+            if (isStreamPaused) return;
+
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+
+            timelineChart.data.labels.push(timeStr);
+            timelineChart.data.datasets[0].data.push(incomingFlowsCounter);
+            timelineChart.data.datasets[1].data.push(incomingAnomaliesCounter);
+
+            if (timelineChart.data.labels.length > maxPoints) {
+                timelineChart.data.labels.shift();
+                timelineChart.data.datasets[0].data.shift();
+                timelineChart.data.datasets[1].data.shift();
+            }
+
+            document.getElementById('traffic-rate-badge').innerText = `${incomingFlowsCounter} fluxuri/s`;
+            timelineChart.update('none');
+
+            incomingFlowsCounter = 0;
+            incomingAnomaliesCounter = 0;
+        }, 1000);
+
         socket.onopen = () => {
             const badge = document.getElementById('ws-badge');
-            badge.innerText = "WebSocket Conectat (Live)";
+            badge.innerText = "Live";
             badge.className = "badge bg-success";
         };
 
@@ -225,19 +563,43 @@
         };
 
         socket.onmessage = (event) => {
+            if (isStreamPaused) return;
+
             const raw = JSON.parse(event.data);
             const data = raw.payload ? raw.payload : raw;
 
             totalCount++;
+            incomingFlowsCounter++;
             document.getElementById('stat-total').innerText = totalCount;
 
-            if (data.rule && !data.rule.includes("CLEAN") && !data.rule.includes("PASSED")) {
+            const isAlert = data.rule && !data.rule.includes("CLEAN") && !data.rule.includes("PASSED");
+            const isMLAnomaly = data.severity === 'HIGH' || data.severity === 'CRITICAL';
+
+            if (isAlert) {
                 suricataCount++;
+                incomingAnomaliesCounter++;
                 document.getElementById('stat-suricata').innerText = suricataCount;
-            } else if (data.severity === 'HIGH' || data.severity === 'CRITICAL') {
+            } else if (isMLAnomaly) {
                 mlCount++;
+                incomingAnomaliesCounter++;
                 document.getElementById('stat-ml').innerText = mlCount;
             }
+
+            const rName = (data.rule || "").toUpperCase();
+            if (rName.includes("DOS") || rName.includes("DDOS") || rName.includes("HULK")) {
+                attackCategories['DoS/DDoS']++;
+            } else if (rName.includes("PORTSCAN") || rName.includes("SCAN")) {
+                attackCategories['PortScan']++;
+            } else if (rName.includes("WEB") || rName.includes("SQL")) {
+                attackCategories['Web Attack']++;
+            } else if (rName.includes("BRUTE") || rName.includes("SSH")) {
+                attackCategories['BruteForce']++;
+            } else {
+                attackCategories['Zero-Day']++;
+            }
+
+            attackPieChart.data.datasets[0].data = Object.values(attackCategories);
+            attackPieChart.update('none');
 
             const tbody = document.getElementById('alerts-tbody');
             const row = document.createElement('tr');
@@ -250,16 +612,22 @@
 
             row.innerHTML = `
                 <td>${data.timestamp}</td>
-                <td>${data.src_ip}</td>
+                <td><code class="text-info">${data.src_ip}</code></td>
                 <td>${data.dst_ip}</td>
                 <td><code>${data.dst_port}</code></td>
-                <td><span class="badge bg-secondary">${data.rule}</span></td>
+                <td><span class="badge bg-secondary" style="font-size: 0.75rem;">${data.rule}</span></td>
                 <td>${data.ml_score}</td>
                 <td><strong>${data.final_risk}</strong></td>
                 <td><span class="badge ${badgeClass}">${data.severity}</span></td>
             `;
 
             tbody.insertBefore(row, tbody.firstChild);
+
+            const query = document.getElementById('filter-search-input').value.trim();
+            const sev = document.getElementById('filter-severity-select').value;
+            if (query || sev !== 'ALL') {
+                applyTableFilters();
+            }
         };
 
         function inspectAlert(alertId) {
@@ -283,30 +651,23 @@
                     document.getElementById('modal-flow-bwd').innerText = data.flow_details.bwd_pkts;
                     document.getElementById('modal-flow-bps').innerText = data.flow_details.bytes_per_sec;
 
-                    document.getElementById('btn-export-pdf').href = `/api/alert/${data.id}/pdf/`;
+                    if (data.mitre) {
+                        document.getElementById('mitre-tech-id').innerText = data.mitre.technique_id;
+                        document.getElementById('mitre-tactic').innerText = data.mitre.tactic;
+                        document.getElementById('mitre-tech-name').innerText = data.mitre.technique_name;
+                        document.getElementById('mitre-subtech').innerText = data.mitre.subtechnique;
+                    }
 
+                    document.getElementById('btn-export-pdf').href = `/api/alert/${data.id}/pdf/`;
                     currentInvestigatedIP = data.flow_details.src_ip;
                     modal.show();
                 })
-                .catch(err => console.error("Eroare la încărcarea detaliilor:", err));
+                .catch(err => console.error("Eroare la incarcarea detaliilor:", err));
         }
 
-        function triggerBlockIP() {
-            if (!currentInvestigatedIP) return;
-            fetch('/api/block-ip/', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ip: currentInvestigatedIP, reason: 'Manual block from incident triage' })
-            })
-            .then(res => res.json())
-            .then(resp => {
-                alert(`IP-ul ${currentInvestigatedIP} a fost adăugat în lista de blocare a firewall-ului!`);
-                modal.hide();
-            });
-        }
-        // Încarcă regulile active de firewall la deschiderea paginii
         document.addEventListener("DOMContentLoaded", () => {
             loadBlockedIPs();
+            loadAuditLogs();
         });
 
         function loadBlockedIPs() {
@@ -317,19 +678,17 @@
                     tbody.innerHTML = '';
 
                     if (!data.blocked_ips || data.blocked_ips.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="5" class="text-secondary py-3">Nicio regulă activă de blocare în acest moment.</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="3" class="text-secondary py-3">Nicio regulă activă de blocare.</td></tr>';
                         return;
                     }
 
                     data.blocked_ips.forEach(b => {
                         const row = document.createElement('tr');
                         row.innerHTML = `
-                            <td><span class="badge bg-danger fs-6">${b.ip}</span></td>
-                            <td class="text-light">${b.reason}</td>
-                            <td><code>${b.blocked_at}</code></td>
-                            <td><span class="badge bg-secondary">${b.expires_at}</span></td>
+                            <td><span class="badge bg-danger">${b.ip}</span></td>
+                            <td class="text-light small text-truncate" style="max-width: 140px;" title="${b.reason}">${b.reason}</td>
                             <td>
-                                <button class="btn btn-sm btn-outline-warning" onclick="triggerUnblockIP('${b.ip}')">
+                                <button class="btn btn-sm btn-outline-warning py-0 px-1" style="font-size: 0.75rem;" onclick="triggerUnblockIP('${b.ip}')">
                                     Deblochează
                                 </button>
                             </td>
@@ -337,7 +696,43 @@
                         tbody.appendChild(row);
                     });
                 })
-                .catch(err => console.error("Eroare la încărcarea listei de blocare:", err));
+                .catch(err => console.error("Eroare la incarcarea listei de blocare:", err));
+        }
+
+        // INCARCARE JURNAL DE AUDIT SOAR
+        function loadAuditLogs() {
+            fetch('/api/audit-logs/')
+                .then(res => res.json())
+                .then(data => {
+                    const container = document.getElementById('audit-log-container');
+                    container.innerHTML = '';
+
+                    if (!data.logs || data.logs.length === 0) {
+                        container.innerHTML = '<span class="text-secondary">Nicio acțiune înregistrată în jurnalul de audit.</span>';
+                        return;
+                    }
+
+                    data.logs.forEach(l => {
+                        const div = document.createElement('div');
+                        div.className = 'timeline-item';
+
+                        let badgeColor = 'bg-info';
+                        if (l.action_type === 'FIREWALL_BLOCK') badgeColor = 'bg-danger';
+                        else if (l.action_type === 'FIREWALL_UNBLOCK') badgeColor = 'bg-success';
+                        else if (l.action_type === 'SANDBOX_ANALYSIS') badgeColor = 'bg-warning text-dark';
+
+                        div.innerHTML = `
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <span class="badge ${badgeColor}" style="font-size: 0.65rem;">${l.action_type}</span>
+                                <small class="text-secondary" style="font-size: 0.7rem;">${l.timestamp}</small>
+                            </div>
+                            <div class="text-light fw-bold" style="font-size: 0.75rem;">${l.target}</div>
+                            <small class="text-secondary d-block" style="font-size: 0.7rem;">${l.details}</small>
+                        `;
+                        container.appendChild(div);
+                    });
+                })
+                .catch(err => console.error("Eroare la incarcarea logurilor de audit:", err));
         }
 
         function triggerBlockIP() {
@@ -347,21 +742,22 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     ip: currentInvestigatedIP,
-                    reason: 'Izolare automată / manuală din triaj incident',
+                    reason: 'Izolare manuala din triaj incident',
                     duration_minutes: 60
                 })
             })
             .then(res => res.json())
             .then(resp => {
-                alert(`IP-ul ${currentInvestigatedIP} a fost adăugat în regulile de firewall!`);
+                alert(`IP-ul ${currentInvestigatedIP} a fost adaugat in firewall!`);
                 modal.hide();
                 loadBlockedIPs();
+                loadAuditLogs(); // Actualizam automat si timeline-ul de audit
             })
             .catch(err => alert("Eroare la blocare: " + err));
         }
 
         function triggerUnblockIP(ip) {
-            if (!confirm(`Sigur dorești să deblochezi IP-ul ${ip}?`)) return;
+            if (!confirm(`Sigur doresti sa deblochezi IP-ul ${ip}?`)) return;
             fetch('/api/unblock-ip/', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -371,6 +767,7 @@
             .then(resp => {
                 alert(resp.message);
                 loadBlockedIPs();
+                loadAuditLogs(); // Actualizam automat si timeline-ul de audit
             })
             .catch(err => alert("Eroare la deblocare: " + err));
         }

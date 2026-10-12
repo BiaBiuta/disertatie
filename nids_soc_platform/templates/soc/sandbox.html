@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+{% load static %}
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <title>XDR Payload Sandbox | SOC NIDS</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        body {
+            background-color: #0f172a;
+            color: #f8fafc;
+            overflow-x: hidden;
+        }
+        /* Layout Sidebar Stanga Forțat */
+        .sidebar {
+            width: 260px !important;
+            min-height: 100vh !important;
+            background-color: #111827 !important;
+            border-right: 1px solid #334155 !important;
+            border-left: none !important;
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: auto !important;
+            padding: 1.5rem 1rem !important;
+            z-index: 100 !important;
+        }
+        .main-content {
+            margin-left: 260px !important;
+            margin-right: 0 !important;
+            padding: 2rem;
+            width: calc(100% - 260px) !important;
+        }
+        .nav-link {
+            color: #94a3b8;
+            border-radius: 8px;
+            padding: 0.65rem 1rem;
+            margin-bottom: 0.35rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            transition: all 0.2s ease-in-out;
+        }
+        .nav-link:hover {
+            color: #38bdf8;
+            background-color: #1e293b;
+        }
+        .nav-link.active {
+            color: #ffffff;
+            background-color: #0284c7;
+        }
+        .card {
+            background-color: #1e293b;
+            border-color: #334155;
+            color: #f8fafc;
+        }
+    </style>
+</head>
+<body>
+    <!-- Conținut Pagina Sandbox (în stânga meniului) -->
+    <main class="main-content">
+        <header class="mb-4 pb-2 border-bottom border-secondary">
+            <h2 class="h4 mb-1">XDR Payload Sandbox & Static Binary Inspector</h2>
+            <small class="text-secondary">Analiză statică a sarcinilor utile (.exe, .dll, .bin, .com) fără execuție în mediu activ</small>
+        </header>
+
+        <div class="row g-4">
+            <!-- Formular de Încărcare Binar -->
+            <div class="col-lg-5">
+                <div class="card p-4 shadow-sm h-100">
+                    <h5 class="text-info mb-3">
+                        <i class="bi bi-cloud-arrow-up me-2"></i>Încărcare Artefact
+                    </h5>
+                    <p class="text-secondary small mb-3">
+                        Alege un fișier executabil din <code>test_binaries/</code> pentru analiză. Sistemul extrage entropia Shannon, inspectează secțiunile hibride (W+X) și verifică apelurile suspecte din tabela de importuri (IAT).
+                    </p>
+                    <div class="mb-3">
+                        <label class="form-label text-light small fw-bold">Selectare Eșantion Binar:</label>
+                        <input type="file" class="form-control bg-dark text-light border-secondary" id="pe-file-input" accept=".exe,.dll,.bin,.com">
+                    </div>
+                    <button class="btn btn-warning w-100 fw-bold mt-auto" type="button" onclick="uploadAndInspectPE()">
+                        <i class="bi bi-cpu me-1"></i> Declanșează Inspecția Statică
+                    </button>
+                </div>
+            </div>
+
+            <!-- Card Indicatori Teoretici / Ghid Comisie -->
+            <div class="col-lg-7">
+                <div class="card p-4 shadow-sm h-100">
+                    <h5 class="text-light mb-3">
+                        <i class="bi bi-info-circle me-2"></i>Indicatori de Evaluare Criminalistică
+                    </h5>
+                    <div class="row g-3 small">
+                        <div class="col-md-6">
+                            <div class="p-3 rounded bg-dark border border-secondary">
+                                <strong class="text-warning d-block mb-1">Entropia Shannon ($H$)</strong>
+                                <span class="text-secondary">Dacă $H > 7.4$, binarul este comprimat sau criptat cu un packer/crypter.</span>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 rounded bg-dark border border-secondary">
+                                <strong class="text-danger d-block mb-1">Secțiuni W+X (Write+Execute)</strong>
+                                <span class="text-secondary">Secțiuni cu drepturi concomitente de scriere și rulare (specific tehnicilor de unpack în memorie).</span>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 rounded bg-dark border border-secondary">
+                                <strong class="text-info d-block mb-1">Importuri Sensibile</strong>
+                                <span class="text-secondary">Funcții API critice de injectare în alte procese (<code>WriteProcessMemory</code>, <code>VirtualAllocEx</code>).</span>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 rounded bg-dark border border-secondary">
+                                <strong class="text-success d-block mb-1">Amprentă Hash</strong>
+                                <span class="text-secondary">Generare SHA-256 și MD5 pentru identificare unică și trasabilitate în rapoarte.</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card Rezultate Scanare -->
+            <div class="col-12">
+                <div id="pe-analysis-result" class="d-none card p-4 shadow-sm border-secondary bg-black">
+                    <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom border-secondary">
+                        <div>
+                            <span class="text-secondary small d-block">Fișier Inspectat:</span>
+                            <span class="text-light fw-bold fs-5" id="pe-res-filename">-</span>
+                        </div>
+                        <span id="pe-res-verdict" class="badge bg-secondary fs-6 px-3 py-2">-</span>
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4">
+                            <div class="p-2 rounded bg-dark border border-secondary">
+                                <small class="text-secondary d-block">Amprentă SHA-256:</small>
+                                <code class="text-info" id="pe-res-sha256" style="word-break: break-all;">-</code>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-2 rounded bg-dark border border-secondary">
+                                <small class="text-secondary d-block">Entropie Shannon Calculată:</small>
+                                <span class="text-light fw-bold fs-6" id="pe-res-entropy">-</span> / 8.0
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="p-2 rounded bg-dark border border-secondary">
+                                <small class="text-secondary d-block">Scor Risc Binar:</small>
+                                <span class="text-warning fw-bold fs-6" id="pe-res-score">-</span> / 1.0
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <strong class="text-secondary small d-block mb-1">Indicatori Structurați Detectați:</strong>
+                        <ul id="pe-res-findings" class="mb-0 text-warning ps-3"></ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- INCLUDEREA COMPONENTEI DE MENIU SIDEBAR ÎN DREAPTA -->
+    {% include 'soc/sidebar.html' with active_page='sandbox' %}
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        function uploadAndInspectPE() {
+            const fileInput = document.getElementById('pe-file-input');
+            const resultBox = document.getElementById('pe-analysis-result');
+
+            if (!fileInput.files || fileInput.files.length === 0) {
+                alert("Te rog să selectezi un fișier executabil (.exe, .dll sau .com) mai întâi!");
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            resultBox.classList.remove('d-none');
+            document.getElementById('pe-res-filename').innerText = "Se analizează " + file.name + "...";
+            document.getElementById('pe-res-verdict').className = "badge bg-secondary fs-6 px-3 py-2";
+            document.getElementById('pe-res-verdict').innerText = "PROCESARE";
+            document.getElementById('pe-res-findings').innerHTML = "";
+
+            fetch('/api/inspect-artifact/', {
+                method: 'POST',
+                body: formData
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    const a = data.analysis;
+                    document.getElementById('pe-res-filename').innerText = a.file_name;
+
+                    const vBadge = document.getElementById('pe-res-verdict');
+                    vBadge.innerText = a.verdict;
+                    if (a.verdict === 'MALICIOUS') {
+                        vBadge.className = "badge bg-danger fs-6 px-3 py-2";
+                    } else if (a.verdict === 'SUSPICIOUS') {
+                        vBadge.className = "badge bg-warning text-dark fs-6 px-3 py-2";
+                    } else {
+                        vBadge.className = "badge bg-success fs-6 px-3 py-2";
+                    }
+
+                    document.getElementById('pe-res-sha256').innerText = a.sha256;
+                    document.getElementById('pe-res-entropy').innerText = a.entropy;
+                    document.getElementById('pe-res-score').innerText = a.file_risk_score;
+
+                    const findingsUl = document.getElementById('pe-res-findings');
+                    findingsUl.innerHTML = "";
+                    if (a.findings.length === 0) {
+                        findingsUl.innerHTML = "<li class='text-success'>Nu au fost identificate anomalii structurale în antetul binar.</li>";
+                    } else {
+                        a.findings.forEach(f => {
+                            const li = document.createElement('li');
+                            li.innerText = f;
+                            findingsUl.appendChild(li);
+                        });
+                    }
+                } else {
+                    alert("Eroare la analiză: " + (data.details || data.message));
+                }
+            })
+            .catch(err => {
+                alert("Eroare de conexiune la API: " + err);
+            });
+        }
+    </script>
+</body>
+</html>

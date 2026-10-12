@@ -1,0 +1,24 @@
+<!-- soc_core/templates/soc/sidebar.html -->
+<aside class="sidebar d-flex flex-column justify-content-between">
+    <div>
+        <div class="d-flex align-items-center gap-2 mb-4 px-2">
+            <span class="badge bg-primary p-2">NIDS</span>
+            <span class="fw-bold fs-5 text-light">SOC Console</span>
+        </div>
+        <nav class="nav flex-column">
+            <a href="/" class="nav-link {% if active_page == 'dashboard' %}active{% endif %}">
+                <i class="bi bi-speedometer2"></i> Live Monitor & SOC
+            </a>
+            <a href="/sandbox/" class="nav-link {% if active_page == 'sandbox' %}active{% endif %}">
+                <i class="bi bi-shield-shaded"></i> XDR Payload Sandbox
+            </a>
+            <a href="/reports/" class="nav-link {% if active_page == 'reports' %}active{% endif %}">
+                <i class="bi bi-file-earmark-bar-graph"></i> Rapoarte & Metrică
+            </a>
+        </nav>
+    </div>
+    <div class="px-2 pt-3 border-top border-secondary">
+        <small class="text-secondary d-block">Stare Platformă:</small>
+        <span class="badge bg-success mt-1">Sistem Activ</span>
+    </div>
+</aside>
