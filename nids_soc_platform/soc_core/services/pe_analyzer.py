@@ -1,101 +1,101 @@
 import math
 import hashlib
-import os
-import json
+import pefile
 
-try:
-    import pefile
-except ImportError:
-    pefile = None
-
-SUSPICIOUS_IMPORTS = {
-    "virtualalloc", "virtualallocex", "writeprocessmemory",
-    "createremotethread", "setwindowshookex", "urlcacheentry",
-    "winresume", "ntunmapviewofsection", "loadlibrarya", "getprocaddress"
+SUSPICIOUS_APIS = {
+    'VirtualAlloc', 'VirtualAllocEx', 'WriteProcessMemory',
+    'CreateRemoteThread', 'SetWindowsHookExA', 'SetWindowsHookExW',
+    'URLDownloadToFileA', 'URLDownloadToFileW', 'WinExec', 'ShellExecuteA'
 }
 
-def calculate_entropy(data: bytes) -> float:
-    """Calculeaza entropia Shannon (valoare intre 0.0 si 8.0)."""
+def calculate_shannon_entropy(data: bytes) -> float:
     if not data:
         return 0.0
     entropy = 0.0
-    total_len = len(data)
+    length = len(data)
     occurrences = [0] * 256
-    for byte in data:
-        occurrences[byte] += 1
+    for b in data:
+        occurrences[b] += 1
     for count in occurrences:
         if count > 0:
-            p = count / total_len
+            p = count / length
             entropy -= p * math.log2(p)
-    return round(entropy, 3)
+    return round(entropy, 4)
 
-def analyze_pe_bytes(raw_data: bytes, file_name: str = "unknown.exe") -> dict:
-    """Extrage metadatele statice si evalueaza gradul de risc al binarului."""
-    sha256_hash = hashlib.sha256(raw_data).hexdigest()
-    md5_hash = hashlib.md5(raw_data).hexdigest()
-    entropy = calculate_entropy(raw_data)
+def analyze_pe_bytes(byte_data: bytes, file_name: str = "sample.bin") -> dict:
+    sha256_hash = hashlib.sha256(byte_data).hexdigest()
+    md5_hash = hashlib.md5(byte_data).hexdigest()
+    overall_entropy = calculate_shannon_entropy(byte_data)
 
     findings = []
-    risk_score = 0.0
+    sections = []
+    imports = []
+    file_risk = 0.1
 
-    # 1. Evaluare entropie
-    if entropy > 7.2:
-        risk_score += 0.45
-        findings.append(f"Entropie foarte ridicata ({entropy}) - potential packer/cod criptat")
-    elif entropy > 6.8:
-        risk_score += 0.20
-        findings.append(f"Entropie usor peste medie ({entropy})")
+    try:
+        pe = pefile.PE(data=byte_data)
 
-    # 2. Inspectare antet PE cu pefile
-    is_pe = False
-    wx_sections = []
-    flagged_apis = []
+        # 1. Analiza sectiunilor PE
+        for s in pe.sections:
+            sec_name = s.Name.decode(errors='ignore').strip('\x00')
+            sec_entropy = round(s.get_entropy(), 2)
+            is_wx = (s.Characteristics & 0x80000000) and (s.Characteristics & 0x20000000)
 
-    if pefile:
-        try:
-            pe = pefile.PE(data=raw_data)
-            is_pe = True
+            sections.append({
+                'name': sec_name,
+                'entropy': sec_entropy,
+                'raw_size': s.SizeOfRawData,
+                'is_wx': bool(is_wx)
+            })
 
-            # Verificare sectiuni cu permisiuni Writable + Executable
-            for section in pe.sections:
-                sec_name = section.Name.decode('utf-8', errors='ignore').strip('\x00')
-                chars = section.Characteristics
-                # 0x80000000 = IMAGE_SCN_MEM_WRITE | 0x20000000 = IMAGE_SCN_MEM_EXECUTE
-                if (chars & 0x80000000) and (chars & 0x20000000):
-                    wx_sections.append(sec_name)
+            if sec_entropy > 7.2:
+                findings.append(f"Sectiunea '{sec_name}' prezinta entropie extrema ({sec_entropy}), indicand crypter/obfuscare.")
+                file_risk = max(file_risk, 0.75)
 
-            if wx_sections:
-                risk_score += 0.35
-                findings.append(f"Sectiuni hibride W+X (Write+Execute): {', '.join(wx_sections)}")
+            if is_wx:
+                findings.append(f"Sectiunea '{sec_name}' are permisiuni W+X (Write+Execute) - risc ridicat de unpack in memorie.")
+                file_risk = max(file_risk, 0.85)
 
-            # Verificare importuri de API-uri sensibile
-            if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
-                for entry in pe.DIRECTORY_ENTRY_IMPORT:
-                    for imp in entry.imports:
-                        if imp.name:
-                            fn_name = imp.name.decode('utf-8', errors='ignore').lower()
-                            if fn_name in SUSPICIOUS_IMPORTS:
-                                flagged_apis.append(fn_name)
+        # 2. Analiza IAT (Import Address Table)
+        if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT'):
+            for entry in pe.DIRECTORY_ENTRY_IMPORT:
+                dll_name = entry.dll.decode(errors='ignore')
+                for imp in entry.imports:
+                    if imp.name:
+                        func_name = imp.name.decode(errors='ignore')
+                        is_suspicious = func_name in SUSPICIOUS_APIS
+                        if is_suspicious:
+                            findings.append(f"Import API critic detectat: {func_name} ({dll_name})")
+                            file_risk = max(file_risk, 0.8)
 
-            if flagged_apis:
-                risk_score += 0.25
-                unique_apis = list(set(flagged_apis))
-                findings.append(f"API-uri suspecte apelate: {', '.join(unique_apis[:6])}")
+                        imports.append({
+                            'dll': dll_name,
+                            'function': func_name,
+                            'is_suspicious': is_suspicious
+                        })
+    except Exception as e:
+        findings.append(f"Structura PE nestandard sau corupta: {str(e)[:60]}")
+        sections.append({'name': 'RAW_DATA', 'entropy': overall_entropy, 'raw_size': len(byte_data), 'is_wx': False})
 
-        except Exception:
-            findings.append("Formatul binar nu prezinta un antet PE valid")
+    # Calibrare verdict
+    if overall_entropy > 7.4:
+        file_risk = max(file_risk, 0.7)
 
-    risk_score = min(round(risk_score, 2), 1.0)
-    verdict = "MALICIOUS" if risk_score >= 0.65 else ("SUSPICIOUS" if risk_score >= 0.35 else "BENIGN")
+    if file_risk >= 0.8:
+        verdict = 'MALICIOUS'
+    elif file_risk >= 0.5:
+        verdict = 'SUSPICIOUS'
+    else:
+        verdict = 'BENIGN'
 
     return {
-        "file_name": file_name,
-        "is_pe": is_pe,
-        "sha256": sha256_hash,
-        "md5": md5_hash,
-        "size_bytes": len(raw_data),
-        "entropy": entropy,
-        "findings": findings,
-        "file_risk_score": risk_score,
-        "verdict": verdict
+        'file_name': file_name,
+        'sha256': sha256_hash,
+        'md5': md5_hash,
+        'entropy': overall_entropy,
+        'file_risk_score': round(file_risk, 2),
+        'verdict': verdict,
+        'findings': findings,
+        'sections': sections,
+        'imports': imports[:30]  # primele 30 pentru performanta UI
     }
