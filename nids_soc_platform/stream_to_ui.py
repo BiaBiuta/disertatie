@@ -29,11 +29,13 @@ for idx, row in df.iterrows():
     }
 
     try:
-        r = requests.post(API_URL, json=payload, timeout=2)
+        r = requests.post(API_URL, json=payload, timeout=10)
         if r.status_code == 200:
             res = r.json()
             print(f"[{idx+1}/500] Alert ID {res.get('alert_id')} | Risc: {res.get('final_risk')} | Severitate: {res.get('severity')}")
     except Exception as e:
+        print(f"Latență rețea / Reîncercare: {e}")
+        time.sleep(0.5)
         print(f"Eroare conectare server Django: {e}")
         break
 

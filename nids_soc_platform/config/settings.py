@@ -47,7 +47,19 @@ ASGI_APPLICATION = 'config.asgi.application'
 # Configurare canal în memorie (ideal pentru dezvoltare locală, fără a cere Redis)
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer"
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [
+                {
+                    "address": "redis://127.0.0.1:6379",
+                    "protocol": 2,          # Forțează protocolul RESP2 (elimină blocajul de timeout)
+                    "socket_timeout": 60,   # Evită întreruperile pe conexiuni idle
+                    "health_check_interval": 30,
+                }
+            ],
+            "capacity": 1500,
+            "expiry": 10,
+        },
     },
 }
 MIDDLEWARE = [
@@ -86,8 +98,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'nids_soc_db',
+        'USER': 'nids_admin',
+        'PASSWORD': 'nids_secure_password123',
+        'HOST': '127.0.0.1',
+        'PORT': '5433',
     }
 }
 

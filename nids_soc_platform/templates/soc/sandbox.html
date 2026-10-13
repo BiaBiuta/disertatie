@@ -13,7 +13,6 @@
             color: #f8fafc;
             overflow-x: hidden;
         }
-        /* Layout Sidebar Stanga Forțat */
         .sidebar {
             width: 260px !important;
             min-height: 100vh !important;
@@ -61,8 +60,8 @@
             --bs-table-bg: #1e293b;
             border-color: #334155;
         }
-        .table-scroll-iat {
-            max-height: 220px;
+        .table-scroll {
+            max-height: 240px;
             overflow-y: auto;
         }
         ::-webkit-scrollbar { width: 6px; }
@@ -71,303 +70,277 @@
     </style>
 </head>
 <body>
-    <!-- Sidebar Stanga -->
     {% include 'soc/sidebar.html' with active_page='sandbox' %}
 
     <main class="main-content">
         <header class="mb-4 pb-2 border-bottom border-secondary d-flex justify-content-between align-items-center">
             <div>
                 <h2 class="h4 mb-1">XDR Payload Sandbox & Static Binary Inspector</h2>
-                <small class="text-secondary">Inspecție statică, evaluare entropie Shannon și analiză apeluri de sistem (IAT)</small>
+                <small class="text-secondary">Inspecție euristică, motor reguli YARA, entropie Shannon și răspuns autonom SOAR</small>
             </div>
-            <a href="/" class="btn btn-outline-info btn-sm">
-                <i class="bi bi-speedometer2 me-1"></i> Înapoi la Dashboard
-            </a>
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-success-subtle text-success border border-success px-3 py-2">
+                    <i class="bi bi-broadcast me-1"></i> EDR Host Agent: Conectat
+                </span>
+                <a href="/" class="btn btn-outline-info btn-sm">
+                    <i class="bi bi-speedometer2 me-1"></i> Dashboard
+                </a>
+            </div>
         </header>
 
-        <div class="row g-4">
-            <!-- Formular Încărcare Artefact -->
+        <!-- TABEL LISTĂ ARTEFACTE CAPTURATE (EDR HISTORY) -->
+        <div class="card p-3 shadow-sm mb-4 border-secondary">
+            <div class="d-flex justify-content-between align-items-center mb-2 pb-2 border-bottom border-secondary">
+                <h6 class="text-info fw-bold mb-0">
+                    <i class="bi bi-collection-play me-2"></i>Artefacte Capturate pe Endpoint (EDR & MTA Scenarios)
+                </h6>
+                <small class="text-secondary">Alege un fișier din listă pentru a-i afișa raportul complet de analiză</small>
+            </div>
+            <div class="table-scroll">
+                <table class="table table-dark table-hover table-sm mb-0 small">
+                    <thead>
+                        <tr class="text-secondary">
+                            <th>#ID</th>
+                            <th>Nume Fișier</th>
+                            <th>Amprentă SHA-256</th>
+                            <th>Entropie</th>
+                            <th>Scor Risc</th>
+                            <th>Verdict</th>
+                            <th class="text-end">Acțiune</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if artifacts %}
+                            {% for art in artifacts %}
+                            <tr>
+                                <td>{{ art.id }}</td>
+                                <td class="text-light fw-bold">{{ art.file_name }}</td>
+                                <td><code class="text-secondary" style="font-size: 0.7rem;">{{ art.sha256|slice:":24" }}...</code></td>
+                                <td>{{ art.entropy }}</td>
+                                <td><span class="badge {% if art.file_risk_score >= 0.8 %}bg-danger{% elif art.file_risk_score >= 0.5 %}bg-warning text-dark{% else %}bg-success{% endif %}">{{ art.file_risk_score }}</span></td>
+                                <td>
+                                    {% if art.verdict == 'MALICIOUS' %}
+                                        <span class="badge bg-danger">MALICIOUS</span>
+                                    {% elif art.verdict == 'SUSPICIOUS' %}
+                                        <span class="badge bg-warning text-dark">SUSPICIOUS</span>
+                                    {% else %}
+                                        <span class="badge bg-success">BENIGN</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end">
+                                    <button class="btn btn-outline-info btn-sm py-0 px-2" onclick="loadArtifactReport({{ art.id }})">
+                                        <i class="bi bi-eye me-1"></i> Încarcă Raport
+                                    </button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="7" class="text-center text-secondary py-3">Nu există artefacte inspectate încă. Declanșați un scenariu sau trimiteți un fișier prin EDR.</td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="row g-4 mb-4">
+            <!-- Formular Încărcare Manuală / Simulare -->
             <div class="col-lg-5">
-                <div class="card p-4 shadow-sm h-100">
-                    <h5 class="text-info mb-3">
-                        <i class="bi bi-cloud-arrow-up me-2"></i>Încărcare Artefact
-                    </h5>
-                    <p class="text-secondary small mb-3">
-                        Selectează un fișier executabil din <code>test_binaries/</code> pentru analiză. Sistemul extrage automat amprentele, profilul de entropie pe secțiuni și apelurile IAT suspecte.
-                    </p>
-                    <div class="mb-3">
-                        <label class="form-label text-light small fw-bold">Eșantion Executabil (.exe, .dll):</label>
-                        <input type="file" class="form-control bg-dark text-light border-secondary" id="pe-file-input" accept=".exe,.dll,.bin,.com">
+                <div class="card p-3 shadow-sm mb-3 border-danger">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h6 class="text-danger fw-bold mb-0">
+                            <i class="bi bi-lightning-charge-fill me-1"></i> Simulare Scenariu XDR Live
+                        </h6>
+                        <span class="badge bg-danger">DEMO COMISIE</span>
                     </div>
-                    <button id="btn-inspect" class="btn btn-warning w-100 fw-bold mt-auto" type="button" onclick="uploadAndInspectPE()">
-                        <i class="bi bi-cpu me-1"></i> Declanșează Inspecția Statică
+                    <p class="text-secondary small mb-2">
+                        Generează traficul din setul MTA și binarul capturat pe mașină.
+                    </p>
+                    <button id="btn-trigger-xdr" class="btn btn-danger btn-sm fw-bold w-100" type="button" onclick="triggerXDRSimulation()">
+                        <i class="bi bi-play-circle-fill me-1"></i> Declanșează Atac + Payload EDR
+                    </button>
+                    <div id="xdr-sim-status" class="mt-2 text-info small" style="display: none;"></div>
+                </div>
+
+                <div class="card p-3 shadow-sm">
+                    <h6 class="text-info fw-bold mb-2">
+                        <i class="bi bi-cloud-arrow-up me-1"></i> Încărcare Manuală Binar
+                    </h6>
+                    <div class="mb-2">
+                        <input type="file" class="form-control bg-dark text-light border-secondary form-control-sm" id="pe-file-input" accept=".exe,.dll,.bin,.com">
+                    </div>
+                    <button id="btn-inspect" class="btn btn-warning btn-sm w-100 fw-bold" type="button" onclick="uploadAndInspectPE()">
+                        <i class="bi bi-cpu me-1"></i> Analizează Binarul
                     </button>
                 </div>
             </div>
 
-            <!-- Indicatori Teoretici / Ghid Comisie -->
+            <!-- Indicatori Teoretici -->
             <div class="col-lg-7">
-                <div class="card p-4 shadow-sm h-100">
-                    <h5 class="text-light mb-3">
-                        <i class="bi bi-info-circle me-2"></i>Indicatori de Evaluare Criminalistică
-                    </h5>
-                    <div class="row g-3 small">
+                <div class="card p-3 shadow-sm h-100">
+                    <h6 class="text-light fw-bold mb-2">
+                        <i class="bi bi-info-circle me-1"></i> Indicatori de Decizie Fuzionată XDR + SOAR
+                    </h6>
+                    <div class="row g-2 small">
                         <div class="col-md-6">
-                            <div class="p-3 rounded bg-dark border border-secondary">
-                                <strong class="text-warning d-block mb-1">Entropia Shannon (H)</strong>
-                                <span class="text-secondary">Dacă H &gt; 7.2, binarul conține cod criptat sau comprimat (UPX, crypter).</span>
+                            <div class="p-2 rounded bg-dark border border-secondary">
+                                <strong class="text-warning d-block">Entropia Shannon</strong>
+                                <span class="text-secondary">&gt; 7.2 indică payload criptat sau comprimat.</span>
                             </div>
                         </div>
                         <div class="col-md-6">
-                            <div class="p-3 rounded bg-dark border border-secondary">
-                                <strong class="text-danger d-block mb-1">Secțiuni W+X (Write+Execute)</strong>
-                                <span class="text-secondary">Permisiuni de scriere și rulare pe aceeași secțiune (tehnică tipică de unpack).</span>
+                            <div class="p-2 rounded bg-dark border border-secondary">
+                                <strong class="text-danger d-block">Reguli YARA</strong>
+                                <span class="text-secondary">Detectează UPX, C2 hardcodat, PowerShell mascat.</span>
                             </div>
                         </div>
                         <div class="col-md-6">
-                            <div class="p-3 rounded bg-dark border border-secondary">
-                                <strong class="text-info d-block mb-1">Tabela de Importuri (IAT)</strong>
-                                <span class="text-secondary">Detectarea funcțiilor de proces injection (<code>VirtualAllocEx</code>, <code>WriteProcessMemory</code>).</span>
+                            <div class="p-2 rounded bg-dark border border-secondary">
+                                <strong class="text-info d-block">Apeluri IAT</strong>
+                                <span class="text-secondary">Funcții de injecție memorie (VirtualAllocEx).</span>
                             </div>
                         </div>
                         <div class="col-md-6">
-                            <div class="p-3 rounded bg-dark border border-secondary">
-                                <strong class="text-success d-block mb-1">Cartografiere MITRE ATT&CK</strong>
-                                <span class="text-secondary">Aliniere cu <code>T1027.002</code> (Software Packing) și <code>T1055</code> (Process Injection).</span>
+                            <div class="p-2 rounded bg-dark border border-secondary">
+                                <strong class="text-success d-block">Mesaj Firewall Distinct</strong>
+                                <span class="text-secondary">Blocat cu tag-ul <code>[XDR-EDR-FUSION]</code>.</span>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
+        </div>
 
-            <!-- Rezultate Detaliate Analiză Binară -->
-            <div class="col-12">
-                <div id="pe-analysis-result" class="d-none card p-4 shadow-sm border-secondary bg-black">
-                    <!-- Header Raport Binar -->
-                    <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom border-secondary">
-                        <div>
-                            <span class="text-secondary small d-block">Fișier Inspectat:</span>
-                            <span class="text-light fw-bold fs-5" id="pe-res-filename">-</span>
-                        </div>
-                        <span id="pe-res-verdict" class="badge bg-secondary fs-6 px-3 py-2">-</span>
-                    </div>
+        <!-- RAPORT DETALIAT (AFIȘAT LA SELECTAREA DIN LISTĂ SAU LA SCANARE) -->
+        <div id="pe-analysis-result" class="d-none card p-4 shadow-sm border-secondary bg-black">
+            <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom border-secondary">
+                <div>
+                    <span class="text-secondary small d-block">Raport Artefact:</span>
+                    <span class="text-light fw-bold fs-5" id="pe-res-filename">-</span>
+                </div>
+                <span id="pe-res-verdict" class="badge bg-secondary fs-6 px-3 py-2">-</span>
+            </div>
 
-                    <!-- Hash-uri și Metadate -->
-                    <div class="row g-3 mb-4">
-                        <div class="col-md-4">
-                            <div class="p-2 rounded bg-dark border border-secondary">
-                                <small class="text-secondary d-block">Amprentă SHA-256:</small>
-                                <code class="text-info" id="pe-res-sha256" style="word-break: break-all;">-</code>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div class="p-2 rounded bg-dark border border-secondary">
-                                <small class="text-secondary d-block">Entropie Globală:</small>
-                                <span class="text-light fw-bold fs-6" id="pe-res-entropy">-</span> / 8.0
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div class="p-2 rounded bg-dark border border-secondary">
-                                <small class="text-secondary d-block">Scor Risc Binar:</small>
-                                <span class="text-warning fw-bold fs-6" id="pe-res-score">-</span> / 1.0
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Două Coloane: Grafic Entropie pe Secțiuni & Tabel IAT -->
-                    <div class="row g-4 mb-4">
-                        <!-- 1. Grafic Entropie pe Secțiuni -->
-                        <div class="col-md-6">
-                            <div class="card p-3 bg-dark border-secondary h-100">
-                                <span class="text-info fw-bold small text-uppercase mb-2">
-                                    <i class="bi bi-bar-chart-fill me-1"></i> Entropie Shannon pe Secțiuni PE
-                                </span>
-                                <div style="height: 200px; position: relative;">
-                                    <canvas id="sectionsEntropyChart"></canvas>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 2. Tabel IAT (Import Address Table) -->
-                        <div class="col-md-6">
-                            <div class="card p-3 bg-dark border-secondary h-100">
-                                <span class="text-warning fw-bold small text-uppercase mb-2">
-                                    <i class="bi bi-file-earmark-code me-1"></i> Import Address Table (IAT)
-                                </span>
-                                <div class="table-scroll-iat">
-                                    <table class="table table-dark table-sm table-hover mb-0" style="font-size: 0.8rem;">
-                                        <thead>
-                                            <tr>
-                                                <th>Modul DLL</th>
-                                                <th>Funcție API</th>
-                                                <th>Stare</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="iat-tbody">
-                                            <tr><td colspan="3" class="text-secondary">Niciun import extras.</td></tr>
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Indicatori Structurați -->
-                    <div>
-                        <strong class="text-secondary small d-block mb-1">Indicatori Criminalistici & Reguli Heuristice:</strong>
-                        <ul id="pe-res-findings" class="mb-0 text-warning ps-3 small"></ul>
+            <div class="row g-3 mb-4">
+                <div class="col-md-4">
+                    <div class="p-2 rounded bg-dark border border-secondary">
+                        <small class="text-secondary d-block">Amprentă SHA-256:</small>
+                        <code class="text-info" id="pe-res-sha256" style="word-break: break-all;">-</code>
                     </div>
                 </div>
+                <div class="col-md-4">
+                    <div class="p-2 rounded bg-dark border border-secondary">
+                        <small class="text-secondary d-block">Entropie Globală:</small>
+                        <span class="text-light fw-bold fs-6" id="pe-res-entropy">-</span> / 8.0
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="p-2 rounded bg-dark border border-secondary">
+                        <small class="text-secondary d-block">Scor Risc Binar:</small>
+                        <span class="text-warning fw-bold fs-6" id="pe-res-score">-</span> / 1.0
+                    </div>
+                </div>
+            </div>
+
+            <!-- Secțiune Reguli YARA -->
+            <div class="mb-4">
+                <strong class="text-secondary small d-block mb-1">
+                    <i class="bi bi-shield-check text-warning me-1"></i>Detecții Reguli YARA (Semnături Statice):
+                </strong>
+                <div id="pe-res-yara" class="p-2 rounded bg-dark border border-secondary small"></div>
+            </div>
+
+            <!-- Indicatori Structurați -->
+            <div class="mb-3">
+                <strong class="text-secondary small d-block mb-1">Concluzii Euristică & Indicatori:</strong>
+                <ul id="pe-res-findings" class="mb-0 text-warning ps-3 small"></ul>
+            </div>
+
+            <!-- Notificare SOAR -->
+            <div id="pe-soar-mitigation-alert" class="alert alert-danger py-2 px-3 small mt-3">
+                <i class="bi bi-shield-lock-fill me-2"></i>
+                <strong>Izolare SOAR Executată:</strong> IP-ul a fost adăugat în Firewall cu eticheta <code>[XDR-EDR-FUSION]</code> și consemnat în Audit Log.
             </div>
         </div>
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        let entropyChartInstance = null;
-
-        function uploadAndInspectPE() {
-            const fileInput = document.getElementById('pe-file-input');
-            const resultBox = document.getElementById('pe-analysis-result');
-            const btn = document.getElementById('btn-inspect');
-
-            if (!fileInput.files || fileInput.files.length === 0) {
-                alert("Te rog să selectezi un fișier executabil (.exe, .dll sau .com) mai întâi!");
-                return;
-            }
-
-            const file = fileInput.files[0];
-            const formData = new FormData();
-            formData.append('file', file);
-
-            btn.disabled = true;
-            btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Se analizează...`;
-
-            resultBox.classList.remove('d-none');
-            document.getElementById('pe-res-filename').innerText = "Se analizează " + file.name + "...";
-            document.getElementById('pe-res-verdict').className = "badge bg-secondary fs-6 px-3 py-2";
-            document.getElementById('pe-res-verdict').innerText = "PROCESARE";
-            document.getElementById('pe-res-findings').innerHTML = "";
-
-            fetch('/api/inspect-artifact/', {
-                method: 'POST',
-                body: formData
-            })
-            .then(res => res.json())
+        // Încărcare raport din lista de istoric
+        function loadArtifactReport(artifactId) {
+            fetch(`/api/artifacts/${artifactId}/`)
+            .then(r => r.json())
             .then(data => {
-                btn.disabled = false;
-                btn.innerHTML = `<i class="bi bi-cpu me-1"></i> Declanșează Inspecția Statică`;
-
                 if (data.status === 'success') {
-                    const a = data.analysis;
-                    document.getElementById('pe-res-filename').innerText = a.file_name;
+                    const art = data.artifact;
+                    document.getElementById('pe-analysis-result').classList.remove('d-none');
+                    document.getElementById('pe-res-filename').innerText = art.file_name;
+                    document.getElementById('pe-res-sha256').innerText = art.sha256;
+                    document.getElementById('pe-res-entropy').innerText = art.entropy;
+                    document.getElementById('pe-res-score').innerText = art.file_risk_score;
 
                     const vBadge = document.getElementById('pe-res-verdict');
-                    vBadge.innerText = a.verdict;
-                    if (a.verdict === 'MALICIOUS') {
-                        vBadge.className = "badge bg-danger fs-6 px-3 py-2";
-                    } else if (a.verdict === 'SUSPICIOUS') {
-                        vBadge.className = "badge bg-warning text-dark fs-6 px-3 py-2";
+                    vBadge.innerText = art.verdict;
+                    vBadge.className = art.verdict === 'MALICIOUS' ? 'badge bg-danger fs-6 px-3 py-2' : 'badge bg-warning text-dark fs-6 px-3 py-2';
+
+                    // YARA
+                    const yaraBox = document.getElementById('pe-res-yara');
+                    if (art.yara_matches && art.yara_matches.length > 0) {
+                        let yHtml = '<ul class="mb-0 ps-3 text-info">';
+                        art.yara_matches.forEach(m => {
+                            yHtml += `<li><strong>${m.rule}</strong>: ${m.description}</li>`;
+                        });
+                        yHtml += '</ul>';
+                        yaraBox.innerHTML = yHtml;
                     } else {
-                        vBadge.className = "badge bg-success fs-6 px-3 py-2";
+                        yaraBox.innerHTML = '<span class="text-secondary">Nicio regulă YARA specifică detectată.</span>';
                     }
 
-                    document.getElementById('pe-res-sha256').innerText = a.sha256;
-                    document.getElementById('pe-res-entropy').innerText = a.entropy;
-                    document.getElementById('pe-res-score').innerText = a.file_risk_score;
-
-                    // 1. Randare Grafic Entropie pe Sectiuni
-                    renderSectionsChart(a.sections || []);
-
-                    // 2. Randare Tabel IAT
-                    renderIATTable(a.imports || []);
-
-                    // 3. Indicatori detectati
+                    // Findings
                     const findingsUl = document.getElementById('pe-res-findings');
                     findingsUl.innerHTML = "";
-                    if (!a.findings || a.findings.length === 0) {
-                        findingsUl.innerHTML = "<li class='text-success'>Nu au fost identificate anomalii structurale în antetul binar.</li>";
-                    } else {
-                        a.findings.forEach(f => {
+                    if (art.findings && art.findings.length > 0) {
+                        art.findings.forEach(f => {
                             const li = document.createElement('li');
                             li.innerText = f;
                             findingsUl.appendChild(li);
                         });
                     }
+
+                    // Scroll către raport
+                    document.getElementById('pe-analysis-result').scrollIntoView({ behavior: 'smooth' });
                 } else {
-                    alert("Eroare la analiză: " + (data.details || data.message));
+                    alert("Eroare la încărcarea raportului: " + data.message);
+                }
+            })
+            .catch(err => alert("Eroare: " + err));
+        }
+
+        // Simulare dinamică
+        function triggerXDRSimulation() {
+            const btn = document.getElementById('btn-trigger-xdr');
+            const statusDiv = document.getElementById('xdr-sim-status');
+            btn.disabled = true;
+            statusDiv.style.display = 'block';
+            statusDiv.innerText = 'Trimitere atac MTA și scriere binar pe disc...';
+
+            fetch('/api/trigger-xdr-simulation/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'attacker_ip=185.196.8.221'
+            })
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false;
+                if (data.status === 'success') {
+                    statusDiv.innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i> Binar generat: ${data.file_name}. Reîmprospătați pagina în 2 secunde pentru a-l vedea în listă.</span>`;
+                    setTimeout(() => location.reload(), 2500);
                 }
             })
             .catch(err => {
                 btn.disabled = false;
-                btn.innerHTML = `<i class="bi bi-cpu me-1"></i> Declanșează Inspecția Statică`;
-                alert("Eroare de conexiune la API: " + err);
-            });
-        }
-
-        function renderSectionsChart(sections) {
-            const ctx = document.getElementById('sectionsEntropyChart').getContext('2d');
-            if (entropyChartInstance) {
-                entropyChartInstance.destroy();
-            }
-
-            const labels = sections.map(s => s.name || 'UNNAMED');
-            const dataValues = sections.map(s => s.entropy);
-            const backgroundColors = sections.map(s => s.entropy > 7.0 ? '#ef4444' : '#38bdf8');
-
-            entropyChartInstance = new Chart(ctx, {
-                type: 'bar',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: 'Entropie Shannon (H)',
-                        data: dataValues,
-                        backgroundColor: backgroundColors,
-                        borderRadius: 4
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            max: 8.0,
-                            grid: { color: '#334155' },
-                            ticks: { color: '#94a3b8' }
-                        },
-                        x: {
-                            ticks: { color: '#cbd5e1' }
-                        }
-                    },
-                    plugins: {
-                        legend: { display: false }
-                    }
-                }
-            });
-        }
-
-        function renderIATTable(imports) {
-            const tbody = document.getElementById('iat-tbody');
-            tbody.innerHTML = '';
-
-            if (imports.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="3" class="text-secondary py-2">Niciun import identificat (posibil binar packed sau static-linked).</td></tr>';
-                return;
-            }
-
-            imports.forEach(imp => {
-                const tr = document.createElement('tr');
-                const badge = imp.is_suspicious
-                    ? '<span class="badge bg-danger" style="font-size: 0.65rem;">SUSPICIOUS API</span>'
-                    : '<span class="badge bg-secondary" style="font-size: 0.65rem;">Standard</span>';
-
-                tr.innerHTML = `
-                    <td><code class="text-info">${imp.dll}</code></td>
-                    <td class="${imp.is_suspicious ? 'text-danger fw-bold' : 'text-light'}">${imp.function}</td>
-                    <td>${badge}</td>
-                `;
-                tbody.appendChild(tr);
+                statusDiv.innerText = 'Eroare: ' + err;
             });
         }
     </script>

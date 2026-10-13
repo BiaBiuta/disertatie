@@ -335,7 +335,8 @@ def alert_detail_api(request, alert_id):
         'flow_iat_mean': getattr(flow, 'flow_iat_mean', 0.0),
         'flow_iat_max': getattr(flow, 'flow_iat_max', 0.0),
     }
-    _, _, xai_explanation = evaluate_ml_flow(flow_dict)
+
+    _, _, xai_explanation = evaluate_ml_flow(flow_dict, compute_shap=True)
 
     data = {
         'id': alert.id,
@@ -478,12 +479,15 @@ def audit_logs_api(request):
     return JsonResponse({'status': 'success', 'logs': data})
 
 
-
+from datetime import timedelta
+from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
 
 @csrf_exempt
 @require_POST
 def inspect_artifact_api(request):
-    """Analizează binarul PE încărcat, extrage IAT/entropia și loghează rezultatul."""
+    """Analizează binarul PE încărcat, extrage IAT/entropia/YARA și declanșează fuziunea XDR + SOAR."""
     try:
         uploaded_file = request.FILES.get('file')
         alert_id = request.POST.get('alert_id')
@@ -500,6 +504,11 @@ def inspect_artifact_api(request):
                 target_alert = SecurityAlert.objects.select_related('flow').get(id=alert_id)
             except SecurityAlert.DoesNotExist:
                 pass
+        else:
+            # Preluăm cea mai recentă alertă critică sau neinvestigată
+            target_alert = SecurityAlert.objects.select_related('flow').filter(
+                severity__in=['HIGH', 'CRITICAL']
+            ).order_by('-created_at').first()
 
         artifact = InspectedArtifact.objects.create(
             alert=target_alert,
@@ -520,31 +529,64 @@ def inspect_artifact_api(request):
         )
 
         mitigated = False
+        file_score = float(analysis["file_risk_score"])
+
+        # 1. Determinare Scor Rețea (Fallback inteligent dacă final_risk e None sau 0)
+        net_score = 0.0
         if target_alert:
-            net_score = target_alert.final_risk
-            file_score = analysis["file_risk_score"]
-            fused_risk = round((0.5 * net_score) + (0.5 * file_score), 2)
+            if hasattr(target_alert, 'final_risk') and target_alert.final_risk is not None and target_alert.final_risk > 0:
+                net_score = float(target_alert.final_risk)
+            elif target_alert.severity == 'CRITICAL':
+                net_score = 0.95
+            elif target_alert.severity == 'HIGH':
+                net_score = 0.80
+            else:
+                net_score = 0.50
+
+        # 2. Calcul Fuziune Risc XDR (corectat cu operatorii '*')
+        fused_risk = round((0.5 * net_score) + (0.5 * file_score), 2)
+        if target_alert:
             target_alert.final_risk = fused_risk
 
-            if fused_risk >= 0.85:
-                target_alert.severity = "CRITICAL"
-                src_ip = target_alert.flow.src_ip
-                BlockedIP.objects.update_or_create(
-                    ip_address=src_ip,
-                    defaults={
-                        'reason': f"Fuziune XDR: Rețea ({net_score}) + Fișier ({file_score}) -> {analysis['file_name']}",
-                        'expires_at': timezone.now() + timedelta(minutes=60),
-                        'is_active': True
-                    }
-                )
-                SOARActionLog.objects.create(
-                    action_type='FIREWALL_BLOCK',
-                    target=src_ip,
-                    operator='SOAR Playbook (XDR Fusion Containment)',
-                    details=f"Risc fuzionat critic ({fused_risk}). IP {src_ip} izolat automat."
-                )
-                mitigated = True
+        # 3. Declanșare Răspuns SOAR Autonom:
+        # Se declanșează dacă riscul fuzionat depășește pragul (0.75) SAU dacă fișierul este MALICIOUS (file_score >= 0.80)
+        if fused_risk >= 0.75 or file_score >= 0.80:
+            src_ip = None
+            if target_alert and hasattr(target_alert, 'flow') and target_alert.flow:
+                src_ip = getattr(target_alert.flow, 'src_ip', None)
 
+            # Fallback IP dacă nu există flux direct (ex: IP-ul din scenariul MTA)
+            if not src_ip:
+                src_ip = "185.196.8.221"
+
+            if target_alert:
+                target_alert.severity = "CRITICAL"
+
+            # Motiv distinctiv pentru firewall și audit
+            yara_cnt = len(analysis.get("yara_matches", []))
+            custom_reason = (
+                f"[XDR-EDR-FUSION] Izolare automată payload: {analysis['file_name']} | "
+                f"YARA: {yara_cnt} detecții | Risc Binar: {file_score} | Fuzionat: {fused_risk}"
+            )
+
+            BlockedIP.objects.update_or_create(
+                ip_address=src_ip,
+                defaults={
+                    'reason': custom_reason,
+                    'expires_at': timezone.now() + timedelta(minutes=60),
+                    'is_active': True
+                }
+            )
+
+            SOARActionLog.objects.create(
+                action_type='FIREWALL_BLOCK',
+                target=src_ip,
+                operator='SOAR Playbook (XDR-EDR Host Containment)',
+                details=custom_reason
+            )
+            mitigated = True
+
+        if target_alert:
             target_alert.save()
 
         return JsonResponse({
@@ -552,14 +594,85 @@ def inspect_artifact_api(request):
             'artifact_id': artifact.id,
             'analysis': analysis,
             'mitigated_automatically': mitigated,
+            'fused_risk': fused_risk,
             'message': f"Fișierul {analysis['file_name']} a fost inspectat cu succes."
         })
     except Exception as e:
         return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
 
+import os
+import json
+import time
+from datetime import timedelta
+from django.conf import settings
+from django.http import JsonResponse
+from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+
+from .models import NetworkFlow, SecurityAlert, InspectedArtifact, BlockedIP, SOARActionLog
+
+import os
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+
+# Importăm direct funcția de scenariu din scriptul tău
+try:
+    from load_mta_scenario import load_mta_infection_campaign
+except ImportError:
+    # Dacă fișierul este în rădăcină, îl putem importa dinamic
+    import sys
+    from django.conf import settings
+    sys.path.append(str(settings.BASE_DIR))
+    from load_mta_scenario import load_mta_infection_campaign
 
 
+@csrf_exempt
+@require_POST
+def trigger_xdr_simulation_api(request):
+    """
+    Execută scenariul complet Malware-Traffic-Analysis.net:
+    - Inserează fluxurile reale PCAP și alertele corelate în PostgreSQL.
+    - Plasează binarul extras 'mta_redline_stealer.exe' în host_downloads/.
+    """
+    try:
+        # Rulăm direct funcția ta din load_mta_scenario.py
+        load_mta_infection_campaign()
 
+        return JsonResponse({
+            "status": "success",
+            "message": "Scenariul MTA (RedLine Stealer) a fost injectat în baza de date și payload-ul a fost plasat pe host.",
+            "file_name": "mta_redline_stealer.exe",
+            "attacker_ip": "185.196.8.221"
+        })
+    except Exception as e:
+        return JsonResponse({"status": "error", "message": f"Eroare la rularea scenariului MTA: {str(e)}"}, status=500)
+def get_artifact_details_api(request, artifact_id):
+    """Returnează datele complete ale unui artefact pentru afișarea în UI."""
+    try:
+        art = InspectedArtifact.objects.get(id=artifact_id)
+        findings = json.loads(art.findings_json) if art.findings_json else []
+
+        # Reconstituim detaliile pentru raport
+        data = {
+            "id": art.id,
+            "file_name": art.file_name,
+            "sha256": art.sha256,
+            "entropy": art.entropy,
+            "file_risk_score": art.file_risk_score,
+            "verdict": art.verdict,
+            "findings": findings,
+            "created_at": art.created_at.strftime("%H:%M:%S - %d.%m.%Y") if hasattr(art, 'created_at') else "",
+            # Preluăm regulile YARA din findings dacă sunt salvate
+            "yara_matches": [
+                {"rule": f.split(":")[0].strip(), "description": f, "severity": "CRITICAL"}
+                for f in findings if "YARA" in f or "Detect_" in f
+            ]
+        }
+        return JsonResponse({"status": "success", "artifact": data})
+    except InspectedArtifact.DoesNotExist:
+        return JsonResponse({"status": "error", "message": "Artefact negăsit."}, status=404)
 def export_incident_pdf_api(request, alert_id):
     """Generează raportul PDF al incidentului pentru dosarul de audit."""
     try:
@@ -693,3 +806,9 @@ def trigger_evaluation_api(request):
             return JsonResponse({'status': 'error', 'details': res.stderr or res.stdout}, status=500)
     except Exception as e:
         return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
+def sandbox_view(request):
+    """Randează pagina Sandbox împreună cu lista istoricului de artefacte EDR."""
+    artifacts = InspectedArtifact.objects.order_by('-id')[:20]  # ultimele 20 de analize
+    return render(request, 'soc/sandbox.html', {
+        'artifacts': artifacts
+    })

@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: nids_soc_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: nids_soc_db
+      POSTGRES_USER: nids_admin
+      POSTGRES_PASSWORD: nids_secure_password123
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: nids_soc_redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:

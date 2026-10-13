@@ -8,7 +8,8 @@ from .views import (
     export_incident_pdf_api,
     trigger_evaluation_api,
     get_blocked_ips_api,
-    unblock_ip_api, inspect_artifact_api, sandbox_view, audit_logs_api
+    unblock_ip_api, inspect_artifact_api, sandbox_view, audit_logs_api, get_artifact_details_api,
+    trigger_xdr_simulation_api
 )
 
 urlpatterns = [
@@ -26,4 +27,6 @@ path('api/recalculate-metrics/', trigger_evaluation_api, name='api_recalculate_m
 path('api/inspect-artifact/', inspect_artifact_api, name='api_inspect_artifact'),
 path('sandbox/', sandbox_view, name='sandbox_view'),
 path('api/audit-logs/', audit_logs_api, name='audit_logs_api'),
+path('api/artifacts/<int:artifact_id>/', get_artifact_details_api, name='artifact_details_api'),
+path('api/trigger-xdr-simulation/', trigger_xdr_simulation_api, name='trigger_xdr_simulation'),
 ]
