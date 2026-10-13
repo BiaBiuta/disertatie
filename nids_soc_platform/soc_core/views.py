@@ -3,8 +3,12 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from datetime import timedelta
 
+import joblib
+import pandas as pd
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.conf import settings
@@ -20,17 +24,107 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .models import BlockedIP, InspectedArtifact, NetworkFlow, SecurityAlert, SOARActionLog
-from .services.detector_mock import predict_and_explain
 from .services.pe_analyzer import analyze_pe_bytes
 from .services.rule_engine import evaluate_suricata_rules
 
 
-# =====================================================================
-# 1. VIEW-URI PAGINI PRINCIPALE (TEMPLATES)
-# =====================================================================
+
+ARTIFACTS_DIR = os.path.join(settings.BASE_DIR, "artifacts")
+MODEL_PATH = os.path.join(ARTIFACTS_DIR, "nids_model.joblib")
+SCALER_PATH = os.path.join(ARTIFACTS_DIR, "scaler.joblib")
+EXPLAINER_PATH = os.path.join(ARTIFACTS_DIR, "shap_explainer.joblib")
+FEATURES_PATH = os.path.join(ARTIFACTS_DIR, "selected_features.json")
+
+_ml_cache = {}
+
+def get_ml_components():
+    """Încarcă o singură dată în memorie artefactele antrenate."""
+    if 'model' not in _ml_cache:
+        if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH) and os.path.exists(EXPLAINER_PATH):
+            try:
+                _ml_cache['model'] = joblib.load(MODEL_PATH)
+                _ml_cache['scaler'] = joblib.load(SCALER_PATH)
+                _ml_cache['explainer'] = joblib.load(EXPLAINER_PATH)
+                with open(FEATURES_PATH, "r") as f:
+                    _ml_cache['features'] = json.load(f).get("features", [])
+            except Exception as e:
+                print(f"[ML Init Error] Nu s-au putut încărca artefactele: {e}")
+    return _ml_cache
+
+def evaluate_ml_flow(flow_dict):
+    """Calculează probabilitatea XGBoost și explicațiile locale TreeSHAP."""
+    components = get_ml_components()
+    if 'model' not in components:
+        return 0.05, False, {}
+
+    features = components['features']
+    scaler = components['scaler']
+    model = components['model']
+    explainer = components['explainer']
+
+    row_data = {
+        features[0]: float(flow_dict.get('total_fwd_packets', 0)),
+        features[1]: float(flow_dict.get('fwd_packet_length_max', flow_dict.get('fwd_pkt_len_max', 0.0))),
+        features[2]: float(flow_dict.get('flow_iat_mean', 0.0)),
+        features[3]: float(flow_dict.get('flow_iat_max', 0.0)),
+    }
+
+    row_df = pd.DataFrame([row_data])[features]
+    scaled_row = scaler.transform(row_df)
+
+    proba = float(model.predict_proba(scaled_row)[0, 1])
+    is_anomaly = proba >= 0.50
+
+    shap_vals = explainer.shap_values(scaled_row)
+    if isinstance(shap_vals, list):
+        sv = shap_vals[1][0]
+    elif getattr(shap_vals, 'ndim', 1) == 2:
+        sv = shap_vals[0]
+    else:
+        sv = shap_vals
+
+    xai_explanation = {}
+    for feat, val, s in zip(features, row_df.iloc[0], sv):
+        xai_explanation[feat] = {
+            'value': round(float(val), 2),
+            'shap_impact': round(float(s), 4),
+            'direction': 'Pushes towards ATTACK' if s > 0 else 'Pushes towards BENIGN'
+        }
+
+    return round(proba, 4), is_anomaly, xai_explanation
+
+
+
+
+_flow_buffer = []
+_alert_buffer = []
+_buffer_lock = threading.Lock()
+
+def _flush_buffer_worker():
+    """Worker de fundal care golește buffer-ul în baza de date prin bulk_create."""
+    while True:
+        time.sleep(1.0)
+        with _buffer_lock:
+            if not _flow_buffer:
+                continue
+            flows_to_insert = list(_flow_buffer)
+            alerts_to_insert = list(_alert_buffer)
+            _flow_buffer.clear()
+            _alert_buffer.clear()
+
+        try:
+            NetworkFlow.objects.bulk_create(flows_to_insert, batch_size=500)
+            SecurityAlert.objects.bulk_create(alerts_to_insert, batch_size=500)
+        except Exception as e:
+            print(f"[Buffer Flush Error] Eroare la bulk_create: {e}")
+
+_worker_thread = threading.Thread(target=_flush_buffer_worker, daemon=True)
+_worker_thread.start()
+
+
 
 def dashboard_view(request):
-    """Afișează pagina principală a panoului SOC cu contoare persistente din baza de date."""
+    """Pagina principală a consolei SOC."""
     alerts = SecurityAlert.objects.select_related('flow').order_by('-created_at')[:50]
     total_flows = NetworkFlow.objects.count()
     suricata_count = SecurityAlert.objects.filter(
@@ -47,12 +141,12 @@ def dashboard_view(request):
 
 
 def sandbox_view(request):
-    """Pagina dedicată pentru analiză statică de binare (XDR Sandbox)."""
+    """Pagina de inspecție binară statică PE."""
     return render(request, 'soc/sandbox.html')
 
 
 def reports_view(request):
-    """Afișează pagina de benchmark și rapoarte încărcând rezultatele GA + CPLEX."""
+    """Pagina de rapoarte științifice GA + CPLEX."""
     base_path = settings.BASE_DIR
     soc_metrics_path = os.path.join(base_path, "reports", "soc_realtime_metrics.json")
     ga_cplex_path = os.path.join(base_path, "reports", "hybrid_ga_cplex_results.json")
@@ -82,12 +176,8 @@ def reports_view(request):
     })
 
 
-# =====================================================================
-# 2. MITRE ATT&CK MAPPING
-# =====================================================================
-
 def get_mitre_mapping(rule_name):
-    """Mapează automat denumirea alertei la framework-ul MITRE ATT&CK."""
+    """Mapează denumirea alertei la matricea MITRE ATT&CK Enterprise."""
     name = (rule_name or "").upper()
 
     if any(k in name for k in ["DOS", "DDOS", "HULK", "SLOWLORIS"]):
@@ -127,23 +217,35 @@ def get_mitre_mapping(rule_name):
         }
 
 
-# =====================================================================
-# 3. INGESTIE FLUXURI & DETECȚIE (CU AUTO-CONTAINMENT SOAR)
-# =====================================================================
-
 @csrf_exempt
 def ingest_flow_api(request):
-    """Endpoint REST unde simulatorul trimite fluxuri brute de rețea."""
+    """Recepționează fluxuri brute și le prelucrează fără blocarea bazei de date."""
     if request.method != 'POST':
         return JsonResponse({'error': 'POST required'}, status=405)
 
     try:
-        data = json.loads(request.body)
+        data = json.loads(request.body.decode('utf-8'))
     except Exception as e:
         return JsonResponse({'error': f'Invalid JSON: {e}'}, status=400)
 
-    # 1. Salvare flux
-    flow = NetworkFlow.objects.create(
+    # 1. Pipeline Hibrid de Decizie
+    rule_result = evaluate_suricata_rules(data)
+
+    if not rule_result.get("needs_ml", True):
+        rule_name = rule_result.get("signature", "MATCHED_RULE")
+        rule_score = rule_result.get("score", 0.8)
+        ml_score, is_anomaly, _ = evaluate_ml_flow(data)
+        final_risk = round(max(rule_score, ml_score), 2)
+        severity = 'CRITICAL' if final_risk >= 0.85 else 'HIGH'
+    else:
+        ml_score, is_anomaly, _ = evaluate_ml_flow(data)
+        rule_name = "CLEAN (SURICATA_PASSED)"
+        rule_score = 0.0
+        final_risk = round(ml_score, 2)
+        severity = 'HIGH' if is_anomaly else 'LOW'
+
+    # 2. Obiecte Django în memorie
+    flow = NetworkFlow(
         src_ip=data.get('src_ip', '127.0.0.1'),
         dst_ip=data.get('dst_ip', '127.0.0.1'),
         src_port=int(data.get('src_port', 0)),
@@ -156,24 +258,7 @@ def ingest_flow_api(request):
         flow_packets_per_sec=float(data.get('flow_packets_per_sec', 0.0))
     )
 
-    # 2. Pipeline Hibrid
-    rule_result = evaluate_suricata_rules(data)
-
-    if not rule_result.get("needs_ml", True):
-        rule_name = rule_result.get("signature", "MATCHED_RULE")
-        rule_score = rule_result.get("score", 0.8)
-        ml_score = 0.0
-        final_risk = rule_score
-        severity = 'CRITICAL' if rule_score >= 0.85 else 'HIGH'
-    else:
-        ml_score, is_over_threshold = predict_anomaly(data)
-        rule_name = "CLEAN (SURICATA_PASSED)"
-        rule_score = 0.0
-        final_risk = round(ml_score, 2)
-        severity = 'HIGH' if is_over_threshold else 'LOW'
-
-    # 3. Creare alertă
-    alert = SecurityAlert.objects.create(
+    alert = SecurityAlert(
         flow=flow,
         rule_name=rule_name,
         rule_score=rule_score,
@@ -182,7 +267,12 @@ def ingest_flow_api(request):
         severity=severity
     )
 
-    # 4. [LOG AUTOMAT SOAR] Auto-Containment dacă riscul este critic
+    # 3. Adăugare în buffer-ul de lot
+    with _buffer_lock:
+        _flow_buffer.append(flow)
+        _alert_buffer.append(alert)
+
+    # 4. Auto-Mitigare SOAR la prag critic (>= 0.90)
     if final_risk >= 0.90:
         if not BlockedIP.objects.filter(ip_address=flow.src_ip, is_active=True).exists():
             BlockedIP.objects.create(
@@ -198,11 +288,11 @@ def ingest_flow_api(request):
                 details=f"Prag critic depășit ({final_risk}). IP izolat automat pentru 30 minute."
             )
 
-    # 5. Broadcast WebSocket
+    # 5. Emitere instantanee prin WebSocket (Zero latență în UI)
     channel_layer = get_channel_layer()
     payload = {
-        'id': alert.id,
-        'timestamp': alert.created_at.strftime("%H:%M:%S"),
+        'id': int(time.time() * 1000) % 100000,
+        'timestamp': timezone.now().strftime("%H:%M:%S"),
         'src_ip': flow.src_ip,
         'dst_ip': flow.dst_ip,
         'dst_port': flow.dst_port,
@@ -219,67 +309,259 @@ def ingest_flow_api(request):
 
     return JsonResponse({
         'status': 'processed',
-        'alert_id': alert.id,
         'final_risk': final_risk,
         'severity': severity
     })
 
 
-# =====================================================================
-# 4. TRIAJ INCIDENT & EXPORT PDF
-# =====================================================================
+
 
 @require_http_methods(["GET"])
 def alert_detail_api(request, alert_id):
-    """Returnează datele complete ale incidentului pentru fereastra modală."""
+    """Returnează analiza completă pentru fereastra modală, inclusiv valorile SHAP."""
     try:
         alert = SecurityAlert.objects.select_related('flow').get(id=alert_id)
-        mitre = get_mitre_mapping(alert.rule_name)
-        flow = alert.flow
-
-        duration = getattr(flow, 'flow_duration', 0.0) or 0.0
-        pps = getattr(flow, 'flow_packets_per_sec', None) or getattr(flow, 'flow_packets_s', 0.0) or 0.0
-        bps = getattr(flow, 'flow_bytes_per_sec', None) or getattr(flow, 'flow_bytes_s', 0.0) or 0.0
-        fwd_pkts = getattr(flow, 'total_fwd_packets', None) or getattr(flow, 'tot_fwd_pkts', 0)
-        bwd_pkts = getattr(flow, 'total_backward_packets', None) or getattr(flow, 'tot_bwd_pkts', 0)
-        xai_data = get_xai_explanation(flow)
-        data = {
-            'id': alert.id,
-            'timestamp': alert.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-            'rule_name': alert.rule_name,
-            'severity': alert.severity,
-            'final_risk': alert.final_risk,
-            'anomaly_score': alert.anomaly_score,
-            'flow_details': {
-                'src_ip': flow.src_ip,
-                'dst_ip': flow.dst_ip,
-                'dst_port': flow.dst_port,
-                'protocol': flow.protocol,
-                'duration': round(float(duration), 4),
-                'packets_per_sec': round(float(pps), 2),
-                'bytes_per_sec': round(float(bps), 2),
-                'fwd_pkts': fwd_pkts,
-                'bwd_pkts': bwd_pkts,
-            },
-            'mitre': mitre,
-            'xai_explanation': xai_data
-        }
-        flow_dict = {
-            'total_fwd_packets': flow.total_fwd_packets,
-            'fwd_packet_length_max': getattr(flow, 'fwd_packet_length_max', 0.0),
-            'flow_iat_mean': getattr(flow, 'flow_iat_mean', 0.0),
-            'flow_iat_max': getattr(flow, 'flow_iat_max', 0.0),
-        }
-        _, _, xai = predict_and_explain(flow_dict)
-
-        data['xai_explanation'] = xai
-        return JsonResponse(data)
     except SecurityAlert.DoesNotExist:
-        return JsonResponse({'status': 'error', 'message': 'Alerta nu exista'}, status=404)
+        alert = SecurityAlert.objects.select_related('flow').last()
+        if not alert:
+            return JsonResponse({'status': 'error', 'message': 'Alerta nu exista'}, status=404)
+
+    flow = alert.flow
+    mitre = get_mitre_mapping(alert.rule_name)
+
+    flow_dict = {
+        'total_fwd_packets': flow.total_fwd_packets,
+        'fwd_packet_length_max': getattr(flow, 'fwd_packet_length_max', 0.0) or getattr(flow, 'fwd_pkt_len_max', 0.0),
+        'flow_iat_mean': getattr(flow, 'flow_iat_mean', 0.0),
+        'flow_iat_max': getattr(flow, 'flow_iat_max', 0.0),
+    }
+    _, _, xai_explanation = evaluate_ml_flow(flow_dict)
+
+    data = {
+        'id': alert.id,
+        'timestamp': alert.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+        'rule_name': alert.rule_name,
+        'severity': alert.severity,
+        'final_risk': alert.final_risk,
+        'anomaly_score': alert.anomaly_score,
+        'flow_details': {
+            'src_ip': flow.src_ip,
+            'dst_ip': flow.dst_ip,
+            'dst_port': flow.dst_port,
+            'protocol': flow.protocol,
+            'duration': round(float(flow.flow_duration), 4),
+            'packets_per_sec': round(float(flow.flow_packets_per_sec), 2),
+            'bytes_per_sec': round(float(flow.flow_bytes_per_sec), 2),
+            'fwd_pkts': flow.total_fwd_packets,
+            'bwd_pkts': flow.total_bwd_packets,
+        },
+        'mitre': mitre,
+        'xai_explanation': xai_explanation
+    }
+    return JsonResponse(data)
+
+
+
+@csrf_exempt
+@require_POST
+def block_ip_api(request):
+    """Adaugă manual un IP în lista de blocare."""
+    try:
+        data = json.loads(request.body.decode('utf-8'))
+        ip = data.get('ip', '').strip()
+        reason = data.get('reason', 'Blocare manuala din triaj SOC')
+        duration_minutes = int(data.get('duration_minutes', 60))
+
+        if not ip:
+            return JsonResponse({'status': 'error', 'message': 'Adresa IP lipseste.'}, status=400)
+
+        expires_at = timezone.now() + timedelta(minutes=duration_minutes)
+
+        blocked_entry, created = BlockedIP.objects.update_or_create(
+            ip_address=ip,
+            defaults={
+                'reason': reason,
+                'expires_at': expires_at,
+                'is_active': True
+            }
+        )
+
+        SOARActionLog.objects.create(
+            action_type='FIREWALL_BLOCK',
+            target=ip,
+            operator='SOC Analyst (Manual Containment)',
+            details=f"Blocare pe Firewall: {reason} (TTL: {duration_minutes}m)"
+        )
+
+        return JsonResponse({
+            'status': 'success',
+            'created': created,
+            'ip': blocked_entry.ip_address,
+            'message': f"IP-ul {ip} a fost adăugat în firewall."
+        })
+    except Exception as e:
+        return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
+
+
+@require_GET
+def get_blocked_ips_api(request):
+    """Returnează regulile active de blocare și curăță automat regulile expirate."""
+    now = timezone.now()
+    expired = BlockedIP.objects.filter(expires_at__lte=now, is_active=True)
+
+    for b in expired:
+        SOARActionLog.objects.create(
+            action_type='FIREWALL_UNBLOCK',
+            target=b.ip_address,
+            operator='SOAR Scheduler (Rule Janitor)',
+            details="TTL de reținere a expirat. IP deblocat automat."
+        )
+    expired.update(is_active=False)
+
+    active_blocks = BlockedIP.objects.filter(is_active=True)
+    payload = [
+        {
+            'id': b.id,
+            'ip': b.ip_address,
+            'reason': b.reason,
+            'blocked_at': b.blocked_at.strftime('%H:%M:%S'),
+            'expires_at': b.expires_at.strftime('%H:%M:%S') if b.expires_at else 'Permanent',
+        }
+        for b in active_blocks
+    ]
+    return JsonResponse({'status': 'success', 'blocked_ips': payload})
+
+
+@csrf_exempt
+@require_POST
+def unblock_ip_api(request):
+    """Deblochează manual un IP și înregistrează acțiunea în audit."""
+    try:
+        data = json.loads(request.body.decode('utf-8'))
+        ip = data.get('ip', '').strip()
+
+        if not ip:
+            return JsonResponse({'status': 'error', 'message': 'Adresa IP lipseste.'}, status=400)
+
+        updated_count = BlockedIP.objects.filter(ip_address=ip, is_active=True).update(is_active=False)
+
+        if updated_count > 0:
+            SOARActionLog.objects.create(
+                action_type='FIREWALL_UNBLOCK',
+                target=ip,
+                operator='SOC Analyst (Manual Release)',
+                details="Deblocare manuală din interfață."
+            )
+            return JsonResponse({'status': 'success', 'message': f"IP-ul {ip} a fost deblocat."})
+        else:
+            return JsonResponse({'status': 'warning', 'message': f"IP-ul {ip} nu era blocat activ."})
+    except Exception as e:
+        return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
+
+
+@require_GET
+def audit_logs_api(request):
+    """Returnează istoricul acțiunilor de răspuns și investigare SOAR."""
+    logs = SOARActionLog.objects.all().order_by('-created_at')[:20]
+    data = [
+        {
+            'id': l.id,
+            'timestamp': l.created_at.strftime('%H:%M:%S'),
+            'date': l.created_at.strftime('%Y-%m-%d'),
+            'action_type': l.action_type,
+            'target': l.target,
+            'operator': l.operator,
+            'details': l.details or '-'
+        }
+        for l in logs
+    ]
+    return JsonResponse({'status': 'success', 'logs': data})
+
+
+
+
+@csrf_exempt
+@require_POST
+def inspect_artifact_api(request):
+    """Analizează binarul PE încărcat, extrage IAT/entropia și loghează rezultatul."""
+    try:
+        uploaded_file = request.FILES.get('file')
+        alert_id = request.POST.get('alert_id')
+
+        if not uploaded_file:
+            return JsonResponse({'status': 'error', 'message': 'Niciun fișier selectat.'}, status=400)
+
+        raw_data = uploaded_file.read()
+        analysis = analyze_pe_bytes(raw_data, file_name=uploaded_file.name)
+
+        target_alert = None
+        if alert_id:
+            try:
+                target_alert = SecurityAlert.objects.select_related('flow').get(id=alert_id)
+            except SecurityAlert.DoesNotExist:
+                pass
+
+        artifact = InspectedArtifact.objects.create(
+            alert=target_alert,
+            file_name=analysis["file_name"],
+            sha256=analysis["sha256"],
+            md5=analysis["md5"],
+            entropy=analysis["entropy"],
+            verdict=analysis["verdict"],
+            file_risk_score=analysis["file_risk_score"],
+            findings_json=json.dumps(analysis["findings"])
+        )
+
+        SOARActionLog.objects.create(
+            action_type='SANDBOX_ANALYSIS',
+            target=uploaded_file.name,
+            operator='XDR Binary Inspector',
+            details=f"Verdict: {analysis['verdict']} | Entropie: {analysis['entropy']} | Risc: {analysis['file_risk_score']}"
+        )
+
+        mitigated = False
+        if target_alert:
+            net_score = target_alert.final_risk
+            file_score = analysis["file_risk_score"]
+            fused_risk = round((0.5 * net_score) + (0.5 * file_score), 2)
+            target_alert.final_risk = fused_risk
+
+            if fused_risk >= 0.85:
+                target_alert.severity = "CRITICAL"
+                src_ip = target_alert.flow.src_ip
+                BlockedIP.objects.update_or_create(
+                    ip_address=src_ip,
+                    defaults={
+                        'reason': f"Fuziune XDR: Rețea ({net_score}) + Fișier ({file_score}) -> {analysis['file_name']}",
+                        'expires_at': timezone.now() + timedelta(minutes=60),
+                        'is_active': True
+                    }
+                )
+                SOARActionLog.objects.create(
+                    action_type='FIREWALL_BLOCK',
+                    target=src_ip,
+                    operator='SOAR Playbook (XDR Fusion Containment)',
+                    details=f"Risc fuzionat critic ({fused_risk}). IP {src_ip} izolat automat."
+                )
+                mitigated = True
+
+            target_alert.save()
+
+        return JsonResponse({
+            'status': 'success',
+            'artifact_id': artifact.id,
+            'analysis': analysis,
+            'mitigated_automatically': mitigated,
+            'message': f"Fișierul {analysis['file_name']} a fost inspectat cu succes."
+        })
+    except Exception as e:
+        return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
+
+
 
 
 def export_incident_pdf_api(request, alert_id):
-    """Generează raportul PDF al incidentului."""
+    """Generează raportul PDF al incidentului pentru dosarul de audit."""
     try:
         alert = SecurityAlert.objects.select_related('flow').get(id=alert_id)
     except SecurityAlert.DoesNotExist:
@@ -377,19 +659,6 @@ def export_incident_pdf_api(request, alert_id):
         Spacer(1, 10)
     ])
 
-    recom_text = """
-    &bull; <b>Izolare la nivelul perimetrului:</b> Mentinerea adresei IP in lista de blocare a firewall-ului.<br/>
-    &bull; <b>Analiza corelata:</b> Verificarea jurnalelor DNS si a cererilor HTTP catre portul tinta.<br/>
-    &bull; <b>Triage intern:</b> Inspectarea statiilor de lucru interne daca IP-ul destinatie gazduieste servicii critice.
-    """
-    elements.extend([
-        Paragraph("3. Actiuni Recomandate & Raspuns la Incident (SOAR)", heading_style),
-        Paragraph(recom_text, body_style),
-        Spacer(1, 12),
-        HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#cbd5e1'), spaceAfter=6),
-        Paragraph("Raport generat automat de platforma de securitate. Validat pentru audit.", ParagraphStyle('Footer', parent=styles['Normal'], fontSize=8, textColor=colors.HexColor('#94a3b8')))
-    ])
-
     doc.build(elements)
     buffer.seek(0)
     response = HttpResponse(buffer, content_type='application/pdf')
@@ -397,221 +666,10 @@ def export_incident_pdf_api(request, alert_id):
     return response
 
 
-# =====================================================================
-# 5. FIREWALL ACL & SOAR ACTIONS (BLOCARE / DEBLOCARE CU AUDIT LOG)
-# =====================================================================
-
-@csrf_exempt
-@require_POST
-def block_ip_api(request):
-    """Adaugă manual un IP în firewall și înregistrează acțiunea în audit."""
-    try:
-        data = json.loads(request.body.decode('utf-8'))
-        ip = data.get('ip', '').strip()
-        reason = data.get('reason', 'Blocare manuala din investigatie SOC')
-        duration_minutes = int(data.get('duration_minutes', 60))
-
-        if not ip:
-            return JsonResponse({'status': 'error', 'message': 'Adresa IP lipseste.'}, status=400)
-
-        expires_at = timezone.now() + timedelta(minutes=duration_minutes)
-
-        blocked_entry, created = BlockedIP.objects.update_or_create(
-            ip_address=ip,
-            defaults={
-                'reason': reason,
-                'expires_at': expires_at,
-                'is_active': True
-            }
-        )
-
-        # Înregistrare în Audit Trail
-        SOARActionLog.objects.create(
-            action_type='FIREWALL_BLOCK',
-            target=ip,
-            operator='SOC Analyst (Manual Containment)',
-            details=f"Blocare pe Firewall: {reason} (TTL: {duration_minutes}m)"
-        )
-
-        return JsonResponse({
-            'status': 'success',
-            'created': created,
-            'ip': blocked_entry.ip_address,
-            'message': f"IP-ul {ip} a fost adăugat în regulile de firewall."
-        })
-    except Exception as e:
-        return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
-
-
-@require_GET
-def get_blocked_ips_api(request):
-    """Returnează regulile active de blocare și curăță regulile expirate."""
-    now = timezone.now()
-
-    # Curățare reguli expirate + Logare curățare
-    expired_rules = BlockedIP.objects.filter(expires_at__lte=now, is_active=True)
-    for rule in expired_rules:
-        SOARActionLog.objects.create(
-            action_type='FIREWALL_UNBLOCK',
-            target=rule.ip_address,
-            operator='SOAR Scheduler (Rule Janitor)',
-            details=f"Perioada de reținere (TTL) a expirat. IP deblocat automat."
-        )
-    expired_rules.update(is_active=False)
-
-    active_blocks = BlockedIP.objects.filter(is_active=True)
-    payload = [
-        {
-            'id': b.id,
-            'ip': b.ip_address,
-            'reason': b.reason,
-            'blocked_at': b.blocked_at.strftime('%H:%M:%S'),
-            'expires_at': b.expires_at.strftime('%H:%M:%S') if b.expires_at else 'Permanent',
-        }
-        for b in active_blocks
-    ]
-    return JsonResponse({'status': 'success', 'blocked_ips': payload})
-
-
-@csrf_exempt
-@require_POST
-def unblock_ip_api(request):
-    """Deblochează manual un IP din firewall și înregistrează acțiunea în audit."""
-    try:
-        data = json.loads(request.body.decode('utf-8'))
-        ip = data.get('ip', '').strip()
-
-        if not ip:
-            return JsonResponse({'status': 'error', 'message': 'Adresa IP lipseste.'}, status=400)
-
-        updated_count = BlockedIP.objects.filter(ip_address=ip, is_active=True).update(is_active=False)
-
-        if updated_count > 0:
-            SOARActionLog.objects.create(
-                action_type='FIREWALL_UNBLOCK',
-                target=ip,
-                operator='SOC Analyst (Manual Release)',
-                details="Deblocare manuală din consola de securitate"
-            )
-            return JsonResponse({'status': 'success', 'message': f"IP-ul {ip} a fost deblocat."})
-        else:
-            return JsonResponse({'status': 'warning', 'message': f"IP-ul {ip} nu era blocat activ."})
-    except Exception as e:
-        return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
-
-
-@require_GET
-def audit_logs_api(request):
-    """Returnează ultimele 20 de acțiuni înregistrate de SOAR și analist."""
-    logs = SOARActionLog.objects.all().order_by('-created_at')[:20]
-    data = [
-        {
-            'id': l.id,
-            'timestamp': l.created_at.strftime('%H:%M:%S'),
-            'date': l.created_at.strftime('%Y-%m-%d'),
-            'action_type': l.action_type,
-            'target': l.target,
-            'operator': l.operator,
-            'details': l.details or '-'
-        }
-        for l in logs
-    ]
-    return JsonResponse({'status': 'success', 'logs': data})
-
-
-# =====================================================================
-# 6. SANDBOX PE & FUZIUNE XDR (CU AUDIT LOG)
-# =====================================================================
-
-@csrf_exempt
-@require_POST
-def inspect_artifact_api(request):
-    """Rulează analiza statică PE asupra fișierului încărcat și loghează rezultatul."""
-    try:
-        uploaded_file = request.FILES.get('file')
-        alert_id = request.POST.get('alert_id')
-
-        if not uploaded_file:
-            return JsonResponse({'status': 'error', 'message': 'Niciun fisier nu a fost transmis.'}, status=400)
-
-        raw_data = uploaded_file.read()
-        analysis = analyze_pe_bytes(raw_data, file_name=uploaded_file.name)
-
-        target_alert = None
-        if alert_id:
-            try:
-                target_alert = SecurityAlert.objects.select_related('flow').get(id=alert_id)
-            except SecurityAlert.DoesNotExist:
-                pass
-
-        artifact = InspectedArtifact.objects.create(
-            alert=target_alert,
-            file_name=analysis["file_name"],
-            sha256=analysis["sha256"],
-            md5=analysis["md5"],
-            entropy=analysis["entropy"],
-            verdict=analysis["verdict"],
-            file_risk_score=analysis["file_risk_score"],
-            findings_json=json.dumps(analysis["findings"])
-        )
-
-        # [LOG AUTOMAT SOAR] Logare inspecție binar
-        SOARActionLog.objects.create(
-            action_type='SANDBOX_ANALYSIS',
-            target=uploaded_file.name,
-            operator='XDR Binary Inspector',
-            details=f"Verdict: {analysis['verdict']} | Entropie: {analysis['entropy']} | Risc: {analysis['file_risk_score']}"
-        )
-
-        mitigated = False
-        if target_alert:
-            net_score = target_alert.final_risk
-            file_score = analysis["file_risk_score"]
-            # Fuziune ponderată: 50% rețea + 50% fișier (corecție sintaxă *)
-            fused_risk = round((0.5 * net_score) + (0.5 * file_score), 2)
-            target_alert.final_risk = fused_risk
-
-            if fused_risk >= 0.85:
-                target_alert.severity = "CRITICAL"
-                src_ip = target_alert.flow.src_ip
-                BlockedIP.objects.update_or_create(
-                    ip_address=src_ip,
-                    defaults={
-                        'reason': f"Fuziune XDR: Retea ({net_score}) + Fisier ({file_score}) -> {analysis['file_name']}",
-                        'expires_at': timezone.now() + timedelta(minutes=60),
-                        'is_active': True
-                    }
-                )
-                SOARActionLog.objects.create(
-                    action_type='FIREWALL_BLOCK',
-                    target=src_ip,
-                    operator='SOAR Playbook (XDR Fusion Containment)',
-                    details=f"Risc fuzionat critic ({fused_risk}). IP {src_ip} blocat automat."
-                )
-                mitigated = True
-
-            target_alert.save()
-
-        return JsonResponse({
-            'status': 'success',
-            'artifact_id': artifact.id,
-            'analysis': analysis,
-            'mitigated_automatically': mitigated,
-            'message': f"Fisierul {analysis['file_name']} a fost inspectat cu succes."
-        })
-
-    except Exception as e:
-        return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
-
-
-# =====================================================================
-# 7. GENERARE GRAFICE LA CERERE
-# =====================================================================
-
 @csrf_exempt
 @require_POST
 def trigger_evaluation_api(request):
-    """Execută scriptul de recalculare la cerere din UI."""
+    """Execută scriptul de regenerare a metricilor la cerere."""
     try:
         script_name = "evaluate_models.py" if os.path.exists(os.path.join(settings.BASE_DIR, "evaluate_models.py")) else "generate_thesis_charts.py"
         script_path = os.path.join(settings.BASE_DIR, script_name)
@@ -630,70 +688,8 @@ def trigger_evaluation_api(request):
         )
 
         if res.returncode == 0:
-            return JsonResponse({'status': 'success', 'message': 'Graficele au fost regenerate cu succes!'})
+            return JsonResponse({'status': 'success', 'message': 'Graficele au fost regenerate!'})
         else:
             return JsonResponse({'status': 'error', 'details': res.stderr or res.stdout}, status=500)
     except Exception as e:
         return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
-import joblib
-import pandas as pd
-import numpy as np
-
-# Căi către artefacte
-ARTIFACTS_DIR = os.path.join(settings.BASE_DIR, "artifacts")
-MODEL_PATH = os.path.join(ARTIFACTS_DIR, "nids_model.joblib")
-SCALER_PATH = os.path.join(ARTIFACTS_DIR, "scaler.joblib")
-EXPLAINER_PATH = os.path.join(ARTIFACTS_DIR, "shap_explainer.joblib")
-FEATURES_PATH = os.path.join(ARTIFACTS_DIR, "selected_features.json")
-
-# Cache în memorie pentru a evita reîncărcarea la fiecare request
-_ml_cache = {}
-
-def get_xai_explanation(flow):
-    """Calculează contribuțiile TreeSHAP pentru cele 4 trăsături ale fluxului."""
-    try:
-        if 'model' not in _ml_cache:
-            if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH) and os.path.exists(EXPLAINER_PATH):
-                _ml_cache['model'] = joblib.load(MODEL_PATH)
-                _ml_cache['scaler'] = joblib.load(SCALER_PATH)
-                _ml_cache['explainer'] = joblib.load(EXPLAINER_PATH)
-                with open(FEATURES_PATH, "r") as f:
-                    _ml_cache['features'] = json.load(f).get("features", [])
-            else:
-                return {}
-
-        features = _ml_cache['features']
-        scaler = _ml_cache['scaler']
-        explainer = _ml_cache['explainer']
-
-        # Mapare sigură a valorilor din modelul Django
-        flow_data = {
-            features[0]: float(getattr(flow, 'total_fwd_packets', 0)),
-            features[1]: float(getattr(flow, 'fwd_packet_length_max', 0.0) or getattr(flow, 'fwd_pkt_len_max', 0.0)),
-            features[2]: float(getattr(flow, 'flow_iat_mean', 0.0) or getattr(flow, 'iat_mean', 0.0)),
-            features[3]: float(getattr(flow, 'flow_iat_max', 0.0) or getattr(flow, 'iat_max', 0.0)),
-        }
-
-        row_df = pd.DataFrame([flow_data])[features]
-        scaled_row = scaler.transform(row_df)
-
-        # Calcul TreeSHAP
-        shap_vals = explainer.shap_values(scaled_row)
-        if isinstance(shap_vals, list):
-            sv = shap_vals[1][0]
-        elif getattr(shap_vals, 'ndim', 1) == 2:
-            sv = shap_vals[0]
-        else:
-            sv = shap_vals
-
-        explanation = {}
-        for feat, val, s in zip(features, row_df.iloc[0], sv):
-            explanation[feat] = {
-                'value': round(float(val), 2),
-                'shap_impact': round(float(s), 4),
-                'direction': 'Amplifică Riscul (Atac)' if s > 0 else 'Reduce Riscul (Benign)'
-            }
-        return explanation
-    except Exception as e:
-        print(f"[XAI Error] Nu s-au putut extrage valorile SHAP: {e}")
-        return {}
