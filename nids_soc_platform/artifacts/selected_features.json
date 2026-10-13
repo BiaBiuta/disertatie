@@ -5,11 +5,7 @@
         "Flow IAT Mean",
         "Flow IAT Max"
     ],
-    "indices": [
-        2,
-        6,
-        16,
-        18
-    ],
-    "total_examined": 20
+    "model_type": "XGBoost + TreeSHAP",
+    "roc_auc": 1.0,
+    "test_samples": 9989
 }

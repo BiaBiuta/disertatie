@@ -1,75 +1,100 @@
 import os
+import json
 import joblib
-import pandas as pd
 import numpy as np
-from pyod.models.iforest import IForest
-from pyod.models.auto_encoder import AutoEncoder
-from sklearn.preprocessing import StandardScaler
+import pandas as pd
+import xgboost as xgb
+import shap
 from sklearn.model_selection import train_test_split
-from soc_core.services.threshold_tuner import find_soc_optimal_threshold
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
 
-print("[1/5] Încărcare dataset...")
-df = pd.read_csv("dataset/cicids2017_sample.csv")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATASET_PATH = os.path.join(BASE_DIR, "dataset", "cicids2017_sample.csv")
+ARTIFACTS_DIR = os.path.join(BASE_DIR, "artifacts")
+FEATURES_PATH = os.path.join(ARTIFACTS_DIR, "selected_features.json")
+
+os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+
+print("[1/5] Încărcare dataset și filtrare trăsături optime GA+CPLEX...")
+df = pd.read_csv(DATASET_PATH)
+
+# Curatare spatii albe din numele coloanelor
 df.columns = df.columns.str.strip()
 
-feature_cols = [
-    'Flow Duration',
-    'Total Fwd Packets',
-    'Total Backward Packets',
-    'Flow Bytes/s',
-    'Flow Packets/s'
-]
+# Citire trasaturi alese de optimizator
+if os.path.exists(FEATURES_PATH):
+    with open(FEATURES_PATH, "r") as f:
+        meta = json.load(f)
+        selected_features = [feat.strip() for feat in meta.get("features", [])]
+else:
+    # Fallback pe cele 4 trasaturi optime documentate
+    selected_features = [
+        "Total Fwd Packets",
+        "Fwd Packet Length Max",
+        "Flow IAT Mean",
+        "Flow IAT Max"
+    ]
 
-df['target'] = df['Label'].apply(lambda x: 0 if str(x).upper() == 'BENIGN' else 1)
+print(f"Trăsături active ({len(selected_features)}): {selected_features}")
 
-X = df[feature_cols].values
-y = df['target'].values
+# Curățare NaN și valori infinite specifice CIC-IDS2017
+df.replace([np.inf, -np.inf], np.nan, inplace=True)
+df.dropna(subset=selected_features + ['Label'], inplace=True)
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
-X_train_benign = X_train[y_train == 0]
+X = df[selected_features]
+y_raw = df['Label'].astype(str)
 
-print("[2/5] Scalare date cu StandardScaler...")
+# Clasificare binară: BENIGN vs ATAC (poate fi extinsă ușor la multi-class)
+y = (y_raw != 'BENIGN').astype(int)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y
+)
+
+print("[2/5] Scalare trăsături...")
 scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train_benign)
+X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
-print("[3/5] Antrenare Model 1: Isolation Forest...")
-iforest_model = IForest(contamination=0.01, random_state=42)
-iforest_model.fit(X_train_scaled)
-
-print("[4/5] Antrenare Model 2: PyTorch Deep Autoencoder...")
-# Arhitectură simetrică: 5 intrări -> 3 -> 2 -> 3 -> 5 ieșiri
-autoencoder_model = AutoEncoder(
-    hidden_neuron_list=[3, 2, 3],
-    epoch_num=25,
-    batch_size=64,
-    contamination=0.01,
-    verbose=0
+print("[3/5] Antrenare clasificator XGBoost...")
+# Folosim hiperparametri calibrați pentru latență redusă și precizie ridicată
+model = xgb.XGBClassifier(
+    n_estimators=100,
+    max_depth=4,
+    learning_rate=0.08,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    scale_pos_weight=(len(y_train) - sum(y_train)) / sum(y_train),  # Compensează dezechilibrul claselor
+    random_state=42,
+    eval_metric="logloss"
 )
-autoencoder_model.fit(X_train_scaled)
-print("[5/5] Calibrare prag SOC bazat pe decizie de ansamblu...")
-scores_iforest = iforest_model.decision_function(X_test_scaled)
-scores_ae = autoencoder_model.decision_function(X_test_scaled)
+model.fit(X_train_scaled, y_train)
 
-# Normalizare scoruri brute pentru combinare
-norm_iforest = (scores_iforest - scores_iforest.min()) / (scores_iforest.max() - scores_iforest.min() + 1e-6)
-norm_ae = (scores_ae - scores_ae.min()) / (scores_ae.max() - scores_ae.min() + 1e-6)
+y_pred = model.predict(X_test_scaled)
+y_proba = model.predict_proba(X_test_scaled)[:, 1]
 
-# Ansamblu ponderat (50% arbori, 50% rețea neuronală)
-ensemble_scores = 0.5 * norm_iforest + 0.5 * norm_ae
+print("\n--- REZULTATE EVALUARE MODEL (TEST SET) ---")
+print(classification_report(y_test, y_pred, target_names=["BENIGN", "ATTACK"]))
+roc_auc = roc_auc_score(y_test, y_proba)
+print(f"ROC-AUC Score: {roc_auc:.4f}")
 
-tune_results = find_soc_optimal_threshold(y_test, ensemble_scores, target_fpr=0.01)
+print("\n[4/5] Inițializare TreeSHAP Explainer...")
+# Folosim modelul nativ XGBoost pentru calcul instantaneu
+explainer = shap.TreeExplainer(model)
 
-print(f" -> Prag ansamblu: {tune_results['optimal_threshold']:.4f}")
-print(f" -> FPR: {tune_results['achieved_fpr']}% | TPR: {tune_results['achieved_tpr']}%")
+print("[5/5] Salvare artefacte...")
+joblib.dump(model, os.path.join(ARTIFACTS_DIR, "nids_model.joblib"))
+joblib.dump(scaler, os.path.join(ARTIFACTS_DIR, "scaler.joblib"))
+joblib.dump(explainer, os.path.join(ARTIFACTS_DIR, "shap_explainer.joblib"))
 
-os.makedirs("models", exist_ok=True)
-joblib.dump({
-    'iforest': iforest_model,
-    'autoencoder': autoencoder_model,
-    'scaler': scaler,
-    'features': feature_cols,
-    'threshold': tune_results['optimal_threshold']
-}, "models/calibrated_detector.pkl")
+# Actualizare selected_features.json
+with open(FEATURES_PATH, "w") as f:
+    json.dump({
+        "features": selected_features,
+        "model_type": "XGBoost + TreeSHAP",
+        "roc_auc": round(roc_auc, 4),
+        "test_samples": len(X_test)
+    }, f, indent=4)
 
-print("Ansamblul IForest + Autoencoder a fost salvat cu succes în models/calibrated_detector.pkl")
+print("Antrenare finalizată cu succes! Artefactele sunt salvate în artifacts/.")

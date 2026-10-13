@@ -352,6 +352,19 @@
                         </div>
                     </div>
 
+                    <!-- Card XAI Explainable AI (SHAP Contributions) -->
+<div class="card bg-dark border-info p-3 mb-3">
+    <div class="d-flex justify-content-between align-items-center mb-2 pb-1 border-bottom border-secondary">
+        <span class="text-info fw-bold small text-uppercase">
+            <i class="bi bi-cpu-fill me-1"></i> Explicabilitate Decizie ML (TreeSHAP XAI)
+        </span>
+        <small class="text-secondary">Ponderea Trăsăturilor GA+CPLEX</small>
+    </div>
+    <div id="xai-container" class="small">
+        <!-- Generat dinamic prin JavaScript -->
+    </div>
+</div>
+
                     <!-- Metadate Flux Retea -->
                     <h6 class="text-info small text-uppercase fw-bold mb-2">Metadate Flux Rețea (CIC-IDS2017)</h6>
                     <div class="table-responsive">
@@ -631,39 +644,63 @@
         };
 
         function inspectAlert(alertId) {
-            fetch(`/api/alert/${alertId}/`)
-                .then(res => res.json())
-                .then(data => {
-                    document.getElementById('modal-alert-id').innerText = data.id;
-                    document.getElementById('modal-time').innerText = data.timestamp;
-                    document.getElementById('modal-src-ip').innerText = data.flow_details.src_ip;
-                    document.getElementById('modal-dst-ip').innerText = data.flow_details.dst_ip;
-                    document.getElementById('modal-port-proto').innerText = `${data.flow_details.dst_port} / ${data.flow_details.protocol}`;
+    fetch(`/api/alert/${alertId}/`)
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('modal-alert-id').innerText = data.id;
+            document.getElementById('modal-time').innerText = data.timestamp;
+            document.getElementById('modal-src-ip').innerText = data.flow_details.src_ip;
+            document.getElementById('modal-dst-ip').innerText = data.flow_details.dst_ip;
+            document.getElementById('modal-port-proto').innerText = `${data.flow_details.dst_port} / ${data.flow_details.protocol}`;
 
-                    const sevBadge = document.getElementById('modal-severity');
-                    sevBadge.innerText = data.severity;
-                    sevBadge.className = 'badge ' + (data.severity === 'CRITICAL' ? 'bg-danger' : (data.severity === 'HIGH' ? 'bg-warning text-dark' : 'bg-info'));
+            const sevBadge = document.getElementById('modal-severity');
+            sevBadge.innerText = data.severity;
+            sevBadge.className = 'badge ' + (data.severity === 'CRITICAL' ? 'bg-danger' : (data.severity === 'HIGH' ? 'bg-warning text-dark' : 'bg-info'));
 
-                    document.getElementById('modal-final-risk').innerText = data.final_risk;
-                    document.getElementById('modal-flow-dur').innerText = data.flow_details.duration + ' s';
-                    document.getElementById('modal-flow-pps').innerText = data.flow_details.packets_per_sec;
-                    document.getElementById('modal-flow-fwd').innerText = data.flow_details.fwd_pkts;
-                    document.getElementById('modal-flow-bwd').innerText = data.flow_details.bwd_pkts;
-                    document.getElementById('modal-flow-bps').innerText = data.flow_details.bytes_per_sec;
+            document.getElementById('modal-final-risk').innerText = data.final_risk;
+            document.getElementById('modal-flow-dur').innerText = data.flow_details.duration + ' s';
+            document.getElementById('modal-flow-pps').innerText = data.flow_details.packets_per_sec;
+            document.getElementById('modal-flow-fwd').innerText = data.flow_details.fwd_pkts;
+            document.getElementById('modal-flow-bwd').innerText = data.flow_details.bwd_pkts;
+            document.getElementById('modal-flow-bps').innerText = data.flow_details.bytes_per_sec;
 
-                    if (data.mitre) {
-                        document.getElementById('mitre-tech-id').innerText = data.mitre.technique_id;
-                        document.getElementById('mitre-tactic').innerText = data.mitre.tactic;
-                        document.getElementById('mitre-tech-name').innerText = data.mitre.technique_name;
-                        document.getElementById('mitre-subtech').innerText = data.mitre.subtechnique;
+            if (data.mitre) {
+                document.getElementById('mitre-tech-id').innerText = data.mitre.technique_id;
+                document.getElementById('mitre-tactic').innerText = data.mitre.tactic;
+                document.getElementById('mitre-tech-name').innerText = data.mitre.technique_name;
+                document.getElementById('mitre-subtech').innerText = data.mitre.subtechnique;
+            }
+
+            // =================================================================
+            // AICI SE ADAUGĂ POPULAREA PENTRU SHAP (XAI):
+            // =================================================================
+            const xaiBox = document.getElementById('xai-container');
+            if (xaiBox) {
+                xaiBox.innerHTML = '';
+                if (data.xai_explanation && Object.keys(data.xai_explanation).length > 0) {
+                    for (const [feat, details] of Object.entries(data.xai_explanation)) {
+                        const isSuspicious = details.shap_impact > 0;
+                        const colorClass = isSuspicious ? 'text-danger' : 'text-success';
+                        const sign = isSuspicious ? '+' : '';
+                        xaiBox.innerHTML += `
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <span class="text-light"><code>${feat}</code> (${details.value}):</span>
+                                <span class="${colorClass} fw-bold">SHAP: ${sign}${details.shap_impact} (${details.direction})</span>
+                            </div>
+                        `;
                     }
+                } else {
+                    xaiBox.innerHTML = '<span class="text-secondary">Nu sunt date SHAP disponibile pentru acest flux.</span>';
+                }
+            }
+            // =================================================================
 
-                    document.getElementById('btn-export-pdf').href = `/api/alert/${data.id}/pdf/`;
-                    currentInvestigatedIP = data.flow_details.src_ip;
-                    modal.show();
-                })
-                .catch(err => console.error("Eroare la incarcarea detaliilor:", err));
-        }
+            document.getElementById('btn-export-pdf').href = `/api/alert/${data.id}/pdf/`;
+            currentInvestigatedIP = data.flow_details.src_ip;
+            modal.show();
+        })
+        .catch(err => console.error("Eroare la incarcarea detaliilor:", err));
+}
 
         document.addEventListener("DOMContentLoaded", () => {
             loadBlockedIPs();

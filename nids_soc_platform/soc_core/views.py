@@ -20,7 +20,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .models import BlockedIP, InspectedArtifact, NetworkFlow, SecurityAlert, SOARActionLog
-from .services.detector_mock import predict_anomaly
+from .services.detector_mock import predict_and_explain
 from .services.pe_analyzer import analyze_pe_bytes
 from .services.rule_engine import evaluate_suricata_rules
 
@@ -242,7 +242,7 @@ def alert_detail_api(request, alert_id):
         bps = getattr(flow, 'flow_bytes_per_sec', None) or getattr(flow, 'flow_bytes_s', 0.0) or 0.0
         fwd_pkts = getattr(flow, 'total_fwd_packets', None) or getattr(flow, 'tot_fwd_pkts', 0)
         bwd_pkts = getattr(flow, 'total_backward_packets', None) or getattr(flow, 'tot_bwd_pkts', 0)
-
+        xai_data = get_xai_explanation(flow)
         data = {
             'id': alert.id,
             'timestamp': alert.created_at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -261,8 +261,18 @@ def alert_detail_api(request, alert_id):
                 'fwd_pkts': fwd_pkts,
                 'bwd_pkts': bwd_pkts,
             },
-            'mitre': mitre
+            'mitre': mitre,
+            'xai_explanation': xai_data
         }
+        flow_dict = {
+            'total_fwd_packets': flow.total_fwd_packets,
+            'fwd_packet_length_max': getattr(flow, 'fwd_packet_length_max', 0.0),
+            'flow_iat_mean': getattr(flow, 'flow_iat_mean', 0.0),
+            'flow_iat_max': getattr(flow, 'flow_iat_max', 0.0),
+        }
+        _, _, xai = predict_and_explain(flow_dict)
+
+        data['xai_explanation'] = xai
         return JsonResponse(data)
     except SecurityAlert.DoesNotExist:
         return JsonResponse({'status': 'error', 'message': 'Alerta nu exista'}, status=404)
@@ -625,3 +635,65 @@ def trigger_evaluation_api(request):
             return JsonResponse({'status': 'error', 'details': res.stderr or res.stdout}, status=500)
     except Exception as e:
         return JsonResponse({'status': 'error', 'details': str(e)}, status=500)
+import joblib
+import pandas as pd
+import numpy as np
+
+# Căi către artefacte
+ARTIFACTS_DIR = os.path.join(settings.BASE_DIR, "artifacts")
+MODEL_PATH = os.path.join(ARTIFACTS_DIR, "nids_model.joblib")
+SCALER_PATH = os.path.join(ARTIFACTS_DIR, "scaler.joblib")
+EXPLAINER_PATH = os.path.join(ARTIFACTS_DIR, "shap_explainer.joblib")
+FEATURES_PATH = os.path.join(ARTIFACTS_DIR, "selected_features.json")
+
+# Cache în memorie pentru a evita reîncărcarea la fiecare request
+_ml_cache = {}
+
+def get_xai_explanation(flow):
+    """Calculează contribuțiile TreeSHAP pentru cele 4 trăsături ale fluxului."""
+    try:
+        if 'model' not in _ml_cache:
+            if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH) and os.path.exists(EXPLAINER_PATH):
+                _ml_cache['model'] = joblib.load(MODEL_PATH)
+                _ml_cache['scaler'] = joblib.load(SCALER_PATH)
+                _ml_cache['explainer'] = joblib.load(EXPLAINER_PATH)
+                with open(FEATURES_PATH, "r") as f:
+                    _ml_cache['features'] = json.load(f).get("features", [])
+            else:
+                return {}
+
+        features = _ml_cache['features']
+        scaler = _ml_cache['scaler']
+        explainer = _ml_cache['explainer']
+
+        # Mapare sigură a valorilor din modelul Django
+        flow_data = {
+            features[0]: float(getattr(flow, 'total_fwd_packets', 0)),
+            features[1]: float(getattr(flow, 'fwd_packet_length_max', 0.0) or getattr(flow, 'fwd_pkt_len_max', 0.0)),
+            features[2]: float(getattr(flow, 'flow_iat_mean', 0.0) or getattr(flow, 'iat_mean', 0.0)),
+            features[3]: float(getattr(flow, 'flow_iat_max', 0.0) or getattr(flow, 'iat_max', 0.0)),
+        }
+
+        row_df = pd.DataFrame([flow_data])[features]
+        scaled_row = scaler.transform(row_df)
+
+        # Calcul TreeSHAP
+        shap_vals = explainer.shap_values(scaled_row)
+        if isinstance(shap_vals, list):
+            sv = shap_vals[1][0]
+        elif getattr(shap_vals, 'ndim', 1) == 2:
+            sv = shap_vals[0]
+        else:
+            sv = shap_vals
+
+        explanation = {}
+        for feat, val, s in zip(features, row_df.iloc[0], sv):
+            explanation[feat] = {
+                'value': round(float(val), 2),
+                'shap_impact': round(float(s), 4),
+                'direction': 'Amplifică Riscul (Atac)' if s > 0 else 'Reduce Riscul (Benign)'
+            }
+        return explanation
+    except Exception as e:
+        print(f"[XAI Error] Nu s-au putut extrage valorile SHAP: {e}")
+        return {}
