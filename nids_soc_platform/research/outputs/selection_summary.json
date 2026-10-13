@@ -1,0 +1,14 @@
+{
+  "method": "NSGA-II (multi-obiectiv) pe split anti-leakage",
+  "max_fpr_budget": 0.01,
+  "selected_features": [
+    "ACK Flag Count",
+    "Subflow Fwd Packets",
+    "Subflow Bwd Bytes"
+  ],
+  "selected_recall": 0.9998,
+  "selected_fpr": 0.0,
+  "selected_n_features": 3,
+  "pareto_size": 4,
+  "execution_time_sec": 14.13
+}
