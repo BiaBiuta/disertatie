@@ -235,11 +235,30 @@ def ingest_flow_api(request):
                     'severity': 'LOW'
                 })
 
-            # 2. Extragem trăsăturile cerute de modelul activ
+            # 2. Extragem trăsăturile cerute de modelul activ.
+            #    Căutare robustă: acceptă atât numele exact din CSV
+            #    ('Fwd Packet Length Mean') cât și variante snake_case trimise de
+            #    simulatoare ('fwd_packet_length_mean'). Fără asta, inferența live
+            #    primește zerouri și niciun atac nu e marcat.
+            def _lookup_feature(fname, payload):
+                if fname in payload:
+                    return payload[fname]
+                stripped = fname.strip()
+                if stripped in payload:
+                    return payload[stripped]
+                snake = stripped.lower().replace(' ', '_').replace('/', '_per_').replace('.', '_')
+                if snake in payload:
+                    return payload[snake]
+                # normalizare agresivă: compară ignorând non-alfanumericele
+                norm = ''.join(ch for ch in stripped.lower() if ch.isalnum())
+                for k, v in payload.items():
+                    if ''.join(ch for ch in str(k).lower() if ch.isalnum()) == norm:
+                        return v
+                return 0.0
+
             row_values = []
             for feat in features:
-                # Căutăm trăsătura direct în corpul cererii sau în cheile alternative
-                val = data.get(feat, data.get(feat.strip(), 0.0))
+                val = _lookup_feature(feat, data)
                 try:
                     row_values.append(float(val))
                 except (ValueError, TypeError):
@@ -267,17 +286,46 @@ def ingest_flow_api(request):
             # 4. Generăm SecurityAlert dacă este detectat atac (prediction == 1 sau probabilitate mare)
             alert_id = 0
             severity = 'LOW'
-            if prediction == 1 or probability > 0.40:  # Prag calibrat pentru demontrare
+            rule_label = f"NIDS ML CLEAN ({mode.upper()})"
+            if prediction == 1 or probability > 0.40:  # Prag calibrat pentru demonstrare
                 severity = 'HIGH' if probability > 0.75 else 'MEDIUM'
+                rule_label = f"NIDS ML Detection ({mode.upper()})"
+                # NOTĂ: SecurityAlert NU are câmpul 'suggested_action' — se folosesc
+                # doar câmpurile reale ale modelului (altfel create() aruncă TypeError
+                # și fluxul de atac eșuează silențios cu 500).
                 alert = SecurityAlert.objects.create(
                     flow=flow,
-                    rule_name=f"NIDS ML Detection ({mode.upper()})",
+                    rule_name=rule_label,
                     severity=severity,
                     final_risk=probability,
                     anomaly_score=probability,
-                    suggested_action="BLOCK_IP" if probability > 0.75 else "MONITOR"
                 )
                 alert_id = alert.id
+
+            # 5. Difuzăm fluxul pe WebSocket către dashboard (timeline, pie chart, tabel).
+            #    Fără acest broadcast, UI-ul nu primește nimic și tabelele/diagramele
+            #    nu se actualizează cu atacuri — exact simptomul raportat.
+            try:
+                channel_layer = get_channel_layer()
+                if channel_layer is not None:
+                    ws_payload = {
+                        'id': alert_id,
+                        'timestamp': flow.timestamp.strftime('%H:%M:%S') if getattr(flow, 'timestamp', None) else '',
+                        'src_ip': flow.src_ip,
+                        'dst_ip': flow.dst_ip,
+                        'dst_port': flow.dst_port,
+                        'rule': rule_label,
+                        'ml_score': round(probability, 3),
+                        'final_risk': round(probability, 3),
+                        'severity': severity,
+                    }
+                    async_to_sync(channel_layer.group_send)(
+                        'soc_stream',
+                        {'type': 'send_alert', 'payload': ws_payload}
+                    )
+            except Exception as ws_err:
+                # Un eșec de broadcast nu trebuie să pice inserarea în baza de date
+                print(f"[WS Warning] group_send a eșuat: {ws_err}")
 
             return JsonResponse({
                 'status': 'success',
