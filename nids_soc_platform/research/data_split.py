@@ -152,7 +152,7 @@ if __name__ == "__main__":
     print(f"Dataset: {len(df)} rânduri | rată atac: {df['target'].mean():.3f}")
     print(f"Trăsături candidate (fără leakage): {len(feats)}")
 
-    rep = diagnose_leakage(df, feats, out_path="outputs/leakage_report.json")
+    rep = diagnose_leakage(df, feats, out_path="research/outputs/leakage_report.json")
     print("\nTop 8 separatoare univariate (posibil separabilitate trivială):")
     for r in rep[:8]:
         flag = "  <== near-perfect" if r["near_perfect_separator"] else ""

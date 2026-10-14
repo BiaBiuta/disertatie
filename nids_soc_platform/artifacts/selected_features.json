@@ -1,11 +1,14 @@
 {
     "features": [
-        "Total Fwd Packets",
-        "Fwd Packet Length Max",
-        "Flow IAT Mean",
-        "Flow IAT Max"
+        "Total Length of Fwd Packets",
+        "Flow IAT Min",
+        "Fwd Header Length",
+        "Average Packet Size",
+        "Subflow Fwd Packets"
     ],
-    "model_type": "XGBoost + TreeSHAP",
-    "roc_auc": 1.0,
-    "test_samples": 9989
+    "model_type": "selected_by_NSGA-II",
+    "selection_method": "NSGA-II multi-objective (anti-leakage grouped split)",
+    "soc_fpr_budget": 0.01,
+    "validation_recall": 1.0,
+    "validation_fpr": 0.003817
 }

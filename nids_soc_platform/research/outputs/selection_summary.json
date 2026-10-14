@@ -2,13 +2,15 @@
   "method": "NSGA-II (multi-obiectiv) pe split anti-leakage",
   "max_fpr_budget": 0.01,
   "selected_features": [
-    "ACK Flag Count",
-    "Subflow Fwd Packets",
-    "Subflow Bwd Bytes"
+    "Total Length of Fwd Packets",
+    "Flow IAT Min",
+    "Fwd Header Length",
+    "Average Packet Size",
+    "Subflow Fwd Packets"
   ],
-  "selected_recall": 0.9998,
-  "selected_fpr": 0.0,
-  "selected_n_features": 3,
-  "pareto_size": 4,
-  "execution_time_sec": 14.13
+  "selected_recall": 1.0,
+  "selected_fpr": 0.003817,
+  "selected_n_features": 5,
+  "pareto_size": 24,
+  "execution_time_sec": 62.29
 }
