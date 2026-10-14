@@ -182,6 +182,16 @@ def main():
     with open(os.path.join(ARTIFACTS_DIR, "selected_features.json"), "w") as f:
         json.dump(default_feats, f, indent=2)
 
+    # explainer SHAP pentru cardul XAI din modal (doar dacă shap e instalat)
+    try:
+        import shap
+        default_model = joblib.load(os.path.join(ARTIFACTS_DIR, "nids_model.joblib"))
+        explainer = shap.TreeExplainer(default_model)
+        joblib.dump(explainer, os.path.join(ARTIFACTS_DIR, "shap_explainer.joblib"))
+        print("   [XAI] shap_explainer.joblib generat (cardul SHAP din modal va funcționa).")
+    except Exception as shap_err:
+        print(f"   [XAI] shap indisponibil ({shap_err}); modalul va funcționa fără cardul SHAP.")
+
     # config model activ
     with open(os.path.join(ARTIFACTS_DIR, "active_model_config.json"), "w") as f:
         json.dump({"active_mode": dm}, f, indent=2)

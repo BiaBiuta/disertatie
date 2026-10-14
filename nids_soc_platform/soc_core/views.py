@@ -40,56 +40,94 @@ _ml_cache = {}
 def get_ml_components():
     """Încarcă o singură dată în memorie artefactele antrenate."""
     if 'model' not in _ml_cache:
-        if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH) and os.path.exists(EXPLAINER_PATH):
+        # Nu mai cerem obligatoriu explainer-ul: modelul + scaler-ul + trăsăturile
+        # sunt suficiente pentru probabilitate; SHAP e opțional (explainer separat).
+        if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH) and os.path.exists(FEATURES_PATH):
             try:
                 _ml_cache['model'] = joblib.load(MODEL_PATH)
                 _ml_cache['scaler'] = joblib.load(SCALER_PATH)
-                _ml_cache['explainer'] = joblib.load(EXPLAINER_PATH)
-                with open(FEATURES_PATH, "r") as f:
-                    _ml_cache['features'] = json.load(f).get("features", [])
+                with open(FEATURES_PATH, "r", encoding='utf-8-sig') as f:
+                    fdata = json.load(f)
+                    _ml_cache['features'] = fdata.get("features", fdata) if isinstance(fdata, dict) else fdata
+                # explainer SHAP — încărcat doar dacă există
+                if os.path.exists(EXPLAINER_PATH):
+                    try:
+                        _ml_cache['explainer'] = joblib.load(EXPLAINER_PATH)
+                    except Exception as ex:
+                        print(f"[ML Init] Explainer SHAP indisponibil: {ex}")
+                        _ml_cache['explainer'] = None
+                else:
+                    _ml_cache['explainer'] = None
             except Exception as e:
                 print(f"[ML Init Error] Nu s-au putut încărca artefactele: {e}")
     return _ml_cache
 
-def evaluate_ml_flow(flow_dict):
-    """Calculează probabilitatea XGBoost și explicațiile locale TreeSHAP."""
+def evaluate_ml_flow(flow_dict, compute_shap=False):
+    """Calculează probabilitatea XGBoost și, opțional, explicațiile locale TreeSHAP.
+
+    NOTĂ: `alert_detail_api` apelează cu compute_shap=True. Înainte, semnătura NU
+    accepta acest argument → TypeError → alert_detail_api dădea 500 → modalul nu se
+    mai deschidea la click pe un atac. Acum argumentul e acceptat, iar SHAP e opțional
+    și protejat (explainer-ul poate lipsi fără a strica modalul).
+    """
     components = get_ml_components()
-    if 'model' not in components:
+    if 'model' not in components or not components.get('features'):
         return 0.05, False, {}
 
     features = components['features']
     scaler = components['scaler']
     model = components['model']
-    explainer = components['explainer']
 
-    row_data = {
-        features[0]: float(flow_dict.get('total_fwd_packets', 0)),
-        features[1]: float(flow_dict.get('fwd_packet_length_max', flow_dict.get('fwd_pkt_len_max', 0.0))),
-        features[2]: float(flow_dict.get('flow_iat_mean', 0.0)),
-        features[3]: float(flow_dict.get('flow_iat_max', 0.0)),
-    }
+    # Construim rândul robust: potrivim fiecare trăsătură cu câmpurile fluxului.
+    def _match(feat):
+        norm = ''.join(c for c in str(feat).lower() if c.isalnum())
+        for k, v in flow_dict.items():
+            if ''.join(c for c in str(k).lower() if c.isalnum()) == norm:
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    return 0.0
+        return 0.0
 
-    row_df = pd.DataFrame([row_data])[features]
-    scaled_row = scaler.transform(row_df)
+    row_data = {feat: _match(feat) for feat in features}
 
-    proba = float(model.predict_proba(scaled_row)[0, 1])
+    try:
+        row_df = pd.DataFrame([row_data])[features]
+        scaled_row = scaler.transform(row_df)
+        proba = float(model.predict_proba(scaled_row)[0, 1])
+    except Exception as e:
+        print(f"[evaluate_ml_flow] inferență eșuată: {e}")
+        return 0.05, False, {}
+
     is_anomaly = proba >= 0.50
 
-    shap_vals = explainer.shap_values(scaled_row)
-    if isinstance(shap_vals, list):
-        sv = shap_vals[1][0]
-    elif getattr(shap_vals, 'ndim', 1) == 2:
-        sv = shap_vals[0]
-    else:
-        sv = shap_vals
+    if not compute_shap:
+        return round(proba, 4), is_anomaly, {}
 
-    xai_explanation = {}
-    for feat, val, s in zip(features, row_df.iloc[0], sv):
-        xai_explanation[feat] = {
-            'value': round(float(val), 2),
-            'shap_impact': round(float(s), 4),
-            'direction': 'Pushes towards ATTACK' if s > 0 else 'Pushes towards BENIGN'
-        }
+    # SHAP opțional și protejat — dacă explainer-ul lipsește sau aruncă, întoarcem {}.
+    explainer = components.get('explainer')
+    if explainer is None:
+        return round(proba, 4), is_anomaly, {}
+
+    try:
+        shap_vals = explainer.shap_values(scaled_row)
+        if isinstance(shap_vals, list):
+            sv = shap_vals[1][0]
+        elif getattr(shap_vals, 'ndim', 1) == 2:
+            sv = shap_vals[0]
+        else:
+            sv = shap_vals
+
+        xai_explanation = {}
+        for feat, val, s in zip(features, row_df.iloc[0], sv):
+            xai_explanation[feat] = {
+                'value': round(float(val), 2),
+                'shap_impact': round(float(s), 4),
+                'direction': 'Pushes towards ATTACK' if s > 0 else 'Pushes towards BENIGN'
+            }
+    except Exception as e:
+        print(f"[evaluate_ml_flow] SHAP eșuat: {e}")
+        return round(proba, 4), is_anomaly, {}
 
     return round(proba, 4), is_anomaly, xai_explanation
 
@@ -283,28 +321,92 @@ def ingest_flow_api(request):
                 flow_packets_per_sec=float(data.get('Flow Packets/s', data.get('flow_packets_per_sec', 0.0)))
             )
 
-            # 4. Generăm SecurityAlert dacă este detectat atac (prediction == 1 sau probabilitate mare)
+            # 3b. Motor de reguli Suricata (scor determinist), fuzionat cu ML.
+            #     Acest pas fusese pierdut la integrarea research-ului: fără el nu se mai
+            #     atingea nivelul CRITICAL și nu se mai declanșa auto-blocarea SOAR.
+            rule_input = {
+                'dst_port': int(flow.dst_port),
+                'flow_duration': float(_lookup_feature('Flow Duration', data) or 0.0),
+                'total_fwd_packets': float(_lookup_feature('Total Fwd Packets', data) or 0.0),
+                'flow_packets_per_sec': float(_lookup_feature('Flow Packets/s', data) or 0.0),
+                'flow_bytes_per_sec': float(_lookup_feature('Flow Bytes/s', data) or 0.0),
+            }
+            try:
+                rule_result = evaluate_suricata_rules(rule_input)
+            except Exception:
+                rule_result = {'rule_triggered': False, 'score': 0.0, 'signature': ''}
+            rule_triggered = bool(rule_result.get('rule_triggered'))
+            rule_score = float(rule_result.get('score', 0.0)) if rule_triggered else 0.0
+            rule_sig = rule_result.get('signature', '')
+
+            # Scor final fuzionat = max(regulă deterministă, probabilitate ML)
+            final_risk = round(max(rule_score, probability), 3)
+
+            # 4. Nivel de severitate pe praguri (inclusiv CRITICAL) + SecurityAlert
+            if final_risk >= 0.85:
+                severity = 'CRITICAL'
+            elif final_risk >= 0.60:
+                severity = 'HIGH'
+            elif final_risk >= 0.40:
+                severity = 'MEDIUM'
+            else:
+                severity = 'LOW'
+
             alert_id = 0
-            severity = 'LOW'
             rule_label = f"NIDS ML CLEAN ({mode.upper()})"
-            if prediction == 1 or probability > 0.40:  # Prag calibrat pentru demonstrare
-                severity = 'HIGH' if probability > 0.75 else 'MEDIUM'
-                rule_label = f"NIDS ML Detection ({mode.upper()})"
-                # NOTĂ: SecurityAlert NU are câmpul 'suggested_action' — se folosesc
-                # doar câmpurile reale ale modelului (altfel create() aruncă TypeError
-                # și fluxul de atac eșuează silențios cu 500).
+            is_attack = (prediction == 1) or (final_risk >= 0.40) or rule_triggered
+            if is_attack:
+                # Eticheta include semnătura regulii (pentru categorisirea din pie chart)
+                if rule_triggered and rule_score >= probability:
+                    rule_label = f"{rule_sig} [{mode.upper()}]"
+                else:
+                    rule_label = f"NIDS ML Detection ({mode.upper()})"
+                # NOTĂ: SecurityAlert NU are câmpul 'suggested_action' — doar câmpuri reale.
                 alert = SecurityAlert.objects.create(
                     flow=flow,
                     rule_name=rule_label,
+                    rule_score=rule_score,
                     severity=severity,
-                    final_risk=probability,
+                    final_risk=final_risk,
                     anomaly_score=probability,
                 )
                 alert_id = alert.id
 
+            # 4b. SOAR — auto-blocare firewall la risc critic (>= 0.90).
+            #     Diferă implicit între modele: final_risk conține componenta ML, care
+            #     diferă per profil (research vs baseline) -> ce IP-uri trec pragul diferă.
+            auto_blocked = False
+            if final_risk >= 0.90:
+                try:
+                    # Stare anterioară: era deja blocat ACTIV (și neexpirat)?
+                    existing = BlockedIP.objects.filter(ip_address=flow.src_ip).first()
+                    was_active = bool(existing and existing.is_active and not existing.is_expired())
+
+                    # update_or_create pe ip_address (unique) -> reactivează/actualizează
+                    # atomic, fără violare de constrângere la fluxuri repetate de la același IP.
+                    BlockedIP.objects.update_or_create(
+                        ip_address=flow.src_ip,
+                        defaults={
+                            'reason': f"Auto-Mitigare SOAR [{mode.upper()}]: risc critic ({final_risk}) - {rule_label}",
+                            'expires_at': timezone.now() + timedelta(minutes=30),
+                            'is_active': True,
+                        }
+                    )
+
+                    # Loghează în audit SOAR doar la blocare nouă sau reactivare (nu la
+                    # fiecare flux de la un IP deja izolat) -> fără spam în loguri.
+                    if not was_active:
+                        auto_blocked = True
+                        SOARActionLog.objects.create(
+                            action_type='AUTO_CONTAINMENT',
+                            target=flow.src_ip,
+                            operator=f'SOAR Engine ({mode})',
+                            details=f"Prag critic depășit ({final_risk}) pe modelul {mode.upper()}. IP izolat 30 min.",
+                        )
+                except Exception as soar_err:
+                    print(f"[SOAR Warning] Auto-block a eșuat: {soar_err}")
+
             # 5. Difuzăm fluxul pe WebSocket către dashboard (timeline, pie chart, tabel).
-            #    Fără acest broadcast, UI-ul nu primește nimic și tabelele/diagramele
-            #    nu se actualizează cu atacuri — exact simptomul raportat.
             try:
                 channel_layer = get_channel_layer()
                 if channel_layer is not None:
@@ -316,7 +418,7 @@ def ingest_flow_api(request):
                         'dst_port': flow.dst_port,
                         'rule': rule_label,
                         'ml_score': round(probability, 3),
-                        'final_risk': round(probability, 3),
+                        'final_risk': final_risk,
                         'severity': severity,
                     }
                     async_to_sync(channel_layer.group_send)(
@@ -324,7 +426,6 @@ def ingest_flow_api(request):
                         {'type': 'send_alert', 'payload': ws_payload}
                     )
             except Exception as ws_err:
-                # Un eșec de broadcast nu trebuie să pice inserarea în baza de date
                 print(f"[WS Warning] group_send a eșuat: {ws_err}")
 
             return JsonResponse({
@@ -332,8 +433,10 @@ def ingest_flow_api(request):
                 'mode_used': mode,
                 'prediction': prediction,
                 'probability': probability,
-                'final_risk': probability,
+                'rule_score': rule_score,
+                'final_risk': final_risk,
                 'severity': severity,
+                'auto_blocked': auto_blocked,
                 'alert_id': alert_id
             })
         except Exception as e:
@@ -363,7 +466,11 @@ def alert_detail_api(request, alert_id):
         'flow_iat_max': getattr(flow, 'flow_iat_max', 0.0),
     }
 
-    _, _, xai_explanation = evaluate_ml_flow(flow_dict, compute_shap=True)
+    try:
+        _, _, xai_explanation = evaluate_ml_flow(flow_dict, compute_shap=True)
+    except Exception as e:
+        print(f"[alert_detail_api] XAI indisponibil: {e}")
+        xai_explanation = {}
 
     data = {
         'id': alert.id,
