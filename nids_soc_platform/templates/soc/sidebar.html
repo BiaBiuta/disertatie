@@ -17,8 +17,70 @@
             </a>
         </nav>
     </div>
+
+    <!-- Zonă Comutator Model ML (Research vs Baseline) + Stare Platformă -->
     <div class="px-2 pt-3 border-top border-secondary">
+        <div class="p-2 mb-3 rounded bg-dark border border-secondary">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <small class="text-secondary fw-bold" style="font-size: 0.7rem;">PROFIL NIDS ML</small>
+                <span id="active-model-badge" class="badge bg-success" style="font-size: 0.65rem;">RESEARCH</span>
+            </div>
+
+            <select id="model-mode-selector" class="form-select form-select-sm bg-black text-light border-secondary mt-1" style="font-size: 0.78rem;" onchange="switchModelProfile(this.value)">
+                <option value="research">🔬 Research (NSGA-II | 5 Feat)</option>
+                <option value="baseline">📊 Baseline (Clasic | 18 Feat)</option>
+            </select>
+
+            <div class="mt-2 d-flex justify-content-between text-muted" style="font-size: 0.68rem;">
+                <span>Latență:</span>
+                <span class="text-info fw-bold" id="model-latency-val">~0.42 ms</span>
+            </div>
+        </div>
+
         <small class="text-secondary d-block">Stare Platformă:</small>
         <span class="badge bg-success mt-1">Sistem Activ</span>
     </div>
 </aside>
+
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    fetch('/api/switch-model/')
+        .then(response => response.json())
+        .then(data => {
+            if (data.active_mode) {
+                const selector = document.getElementById('model-mode-selector');
+                const badge = document.getElementById('active-model-badge');
+                const latency = document.getElementById('model-latency-val');
+
+                if (selector) selector.value = data.active_mode;
+                if (badge) {
+                    badge.innerText = data.active_mode.toUpperCase();
+                    badge.className = data.active_mode === 'research' ? 'badge bg-success' : 'badge bg-primary';
+                }
+                if (data.metrics && data.metrics.latency_ms && latency) {
+                    latency.innerText = data.metrics.latency_ms + ' ms';
+                }
+            }
+        })
+        .catch(err => console.error("Eroare la încărcarea profilului modelului:", err));
+});
+
+function switchModelProfile(newMode) {
+    fetch('/api/switch-model/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ mode: newMode })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            window.location.reload();
+        } else {
+            alert("Eroare: " + data.message);
+        }
+    })
+    .catch(err => alert("Eroare conexiune API: " + err));
+}
+</script>

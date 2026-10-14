@@ -1,100 +1,113 @@
+"""
+train_detector.py
+=================
+Antrenează modelele NIDS pe profilurile 'research' (Pareto 5-feat) sau 'baseline'.
+Utilizare:
+    python train_detector.py --mode research
+    python train_detector.py --mode baseline
+    python train_detector.py --mode all
+"""
+
 import os
 import json
+import argparse
+import time
 import joblib
-import numpy as np
 import pandas as pd
-import xgboost as xgb
-import shap
+from xgboost import XGBClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_PATH = os.path.join(BASE_DIR, "dataset", "cicids2017_sample.csv")
-ARTIFACTS_DIR = os.path.join(BASE_DIR, "artifacts")
-FEATURES_PATH = os.path.join(ARTIFACTS_DIR, "selected_features.json")
+ARTIFACTS_DIR = os.path.join(BASE_DIR, 'artifacts')
+DATASET_PATH = os.path.join(BASE_DIR, 'dataset', 'cicids2017_sample.csv')
 
-os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
-print("[1/5] Încărcare dataset și filtrare trăsături optime GA+CPLEX...")
-df = pd.read_csv(DATASET_PATH)
+def train_single_model(mode='research'):
+    print(f"\n=======================================================")
+    print(f"  Antrenare Detector NIDS — Profil: {mode.upper()}")
+    print(f"=======================================================")
 
-# Curatare spatii albe din numele coloanelor
-df.columns = df.columns.str.strip()
+    if mode == 'research':
+        feat_file = os.path.join(ARTIFACTS_DIR, 'selected_features_research.json')
+        if not os.path.exists(feat_file):
+            feat_file = os.path.join(ARTIFACTS_DIR, 'selected_features.json')
+        model_out = os.path.join(ARTIFACTS_DIR, 'nids_model_research.joblib')
+        scaler_out = os.path.join(ARTIFACTS_DIR, 'scaler_research.joblib')
+    else:
+        feat_file = os.path.join(ARTIFACTS_DIR, 'selected_features_baseline.json')
+        model_out = os.path.join(ARTIFACTS_DIR, 'nids_model_baseline.joblib')
+        scaler_out = os.path.join(ARTIFACTS_DIR, 'scaler_baseline.joblib')
 
-# Citire trasaturi alese de optimizator
-if os.path.exists(FEATURES_PATH):
-    with open(FEATURES_PATH, "r") as f:
-        meta = json.load(f)
-        selected_features = [feat.strip() for feat in meta.get("features", [])]
-else:
-    # Fallback pe cele 4 trasaturi optime documentate
-    selected_features = [
-        "Total Fwd Packets",
-        "Fwd Packet Length Max",
-        "Flow IAT Mean",
-        "Flow IAT Max"
-    ]
+    with open(feat_file, 'r', encoding='utf-8-sig') as f:
+        data = json.load(f)
+        features = data.get('features', data) if isinstance(data, dict) else data
 
-print(f"Trăsături active ({len(selected_features)}): {selected_features}")
+    print(f"-> Număr trăsături utilizate: {len(features)}")
+    print(f"-> Trăsături: {features}")
 
-# Curățare NaN și valori infinite specifice CIC-IDS2017
-df.replace([np.inf, -np.inf], np.nan, inplace=True)
-df.dropna(subset=selected_features + ['Label'], inplace=True)
+    df = pd.read_csv(DATASET_PATH)
+    df.columns = df.columns.str.strip()
+    df['Label_Binary'] = (df['Label'] != 'BENIGN').astype(int)
 
-X = df[selected_features]
-y_raw = df['Label'].astype(str)
+    # Verificăm că toate trăsăturile există în dataset
+    missing = [c for c in features if c not in df.columns]
+    if missing:
+        print(f"⚠️ Atenție, trăsături lipsă în CSV: {missing}")
+        features = [c for c in features if c in df.columns]
 
-# Clasificare binară: BENIGN vs ATAC (poate fi extinsă ușor la multi-class)
-y = (y_raw != 'BENIGN').astype(int)
+    X = df[features].fillna(0)
+    y = df['Label_Binary']
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.25, random_state=42, stratify=y
-)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-print("[2/5] Scalare trăsături...")
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
 
-print("[3/5] Antrenare clasificator XGBoost...")
-# Folosim hiperparametri calibrați pentru latență redusă și precizie ridicată
-model = xgb.XGBClassifier(
-    n_estimators=100,
-    max_depth=4,
-    learning_rate=0.08,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    scale_pos_weight=(len(y_train) - sum(y_train)) / sum(y_train),  # Compensează dezechilibrul claselor
-    random_state=42,
-    eval_metric="logloss"
-)
-model.fit(X_train_scaled, y_train)
+    start_t = time.time()
+    model = XGBClassifier(
+        n_estimators=100,
+        max_depth=5,
+        learning_rate=0.1,
+        eval_metric='logloss',
+        random_state=42
+    )
+    model.fit(X_train_scaled, y_train)
+    train_time = time.time() - start_t
 
-y_pred = model.predict(X_test_scaled)
-y_proba = model.predict_proba(X_test_scaled)[:, 1]
+    # Latență inferență per sample
+    start_inf = time.time()
+    y_pred = model.predict(X_test_scaled)
+    inf_latency_ms = ((time.time() - start_inf) / len(X_test)) * 1000
+    y_prob = model.predict_proba(X_test_scaled)[:, 1]
 
-print("\n--- REZULTATE EVALUARE MODEL (TEST SET) ---")
-print(classification_report(y_test, y_pred, target_names=["BENIGN", "ATTACK"]))
-roc_auc = roc_auc_score(y_test, y_proba)
-print(f"ROC-AUC Score: {roc_auc:.4f}")
+    print("\n--- Raport Clasificare ---")
+    print(classification_report(y_test, y_pred, digits=4))
+    print(f"ROC-AUC: {roc_auc_score(y_test, y_prob):.4f}")
+    print(f"Latență medie inferență: {inf_latency_ms:.4f} ms / flux")
 
-print("\n[4/5] Inițializare TreeSHAP Explainer...")
-# Folosim modelul nativ XGBoost pentru calcul instantaneu
-explainer = shap.TreeExplainer(model)
+    joblib.dump(model, model_out)
+    joblib.dump(scaler, scaler_out)
 
-print("[5/5] Salvare artefacte...")
-joblib.dump(model, os.path.join(ARTIFACTS_DIR, "nids_model.joblib"))
-joblib.dump(scaler, os.path.join(ARTIFACTS_DIR, "scaler.joblib"))
-joblib.dump(explainer, os.path.join(ARTIFACTS_DIR, "shap_explainer.joblib"))
+    # Copiază ca default dacă e research
+    if mode == 'research':
+        joblib.dump(model, os.path.join(ARTIFACTS_DIR, 'nids_model.joblib'))
+        joblib.dump(scaler, os.path.join(ARTIFACTS_DIR, 'scaler.joblib'))
 
-# Actualizare selected_features.json
-with open(FEATURES_PATH, "w") as f:
-    json.dump({
-        "features": selected_features,
-        "model_type": "XGBoost + TreeSHAP",
-        "roc_auc": round(roc_auc, 4),
-        "test_samples": len(X_test)
-    }, f, indent=4)
+    print(f"✅ Model salvat cu succes în: {model_out}\n")
 
-print("Antrenare finalizată cu succes! Artefactele sunt salvate în artifacts/.")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', choices=['research', 'baseline', 'all'], default='all')
+    args = parser.parse_args()
+
+    if args.mode == 'all':
+        train_single_model('baseline')
+        train_single_model('research')
+    else:
+        train_single_model(args.mode)

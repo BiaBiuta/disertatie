@@ -9,7 +9,7 @@ from .views import (
     trigger_evaluation_api,
     get_blocked_ips_api,
     unblock_ip_api, inspect_artifact_api, sandbox_view, audit_logs_api, get_artifact_details_api,
-    trigger_xdr_simulation_api
+    trigger_xdr_simulation_api, switch_active_model_api
 )
 
 urlpatterns = [
@@ -29,4 +29,5 @@ path('sandbox/', sandbox_view, name='sandbox_view'),
 path('api/audit-logs/', audit_logs_api, name='audit_logs_api'),
 path('api/artifacts/<int:artifact_id>/', get_artifact_details_api, name='artifact_details_api'),
 path('api/trigger-xdr-simulation/', trigger_xdr_simulation_api, name='trigger_xdr_simulation'),
+path('api/switch-model/', switch_active_model_api, name='switch_model_api'),
 ]

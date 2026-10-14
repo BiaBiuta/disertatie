@@ -11,7 +11,7 @@ artifacts_dir = "artifacts"
 model = joblib.load(os.path.join(artifacts_dir, "nids_model.joblib"))
 scaler = joblib.load(os.path.join(artifacts_dir, "scaler.joblib"))
 
-with open(os.path.join(artifacts_dir, "selected_features.json"), "r", encoding="utf-8") as f:
+with open(os.path.join(artifacts_dir, "selected_features.json"), "r", encoding="utf-8-sig") as f:
     meta = json.load(f)
 selected_features = meta["features"]
 

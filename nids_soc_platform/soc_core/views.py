@@ -219,100 +219,79 @@ def get_mitre_mapping(rule_name):
 
 @csrf_exempt
 def ingest_flow_api(request):
-    """Recepționează fluxuri brute și le prelucrează fără blocarea bazei de date."""
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST required'}, status=405)
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body.decode('utf-8'))
 
-    try:
-        data = json.loads(request.body.decode('utf-8'))
-    except Exception as e:
-        return JsonResponse({'error': f'Invalid JSON: {e}'}, status=400)
+            # 1. Încărcăm modelul activ selectat din UI (Research sau Baseline)
+            try:
+                model, scaler, features, mode = load_active_nids_components()
+            except Exception as model_err:
+                return JsonResponse({
+                    'status': 'warning',
+                    'message': f'Modelul NIDS nu este antrenat ({model_err}). Rulează train_detector.py --mode all !',
+                    'alert_id': 0,
+                    'final_risk': 0.1,
+                    'severity': 'LOW'
+                })
 
-    # 1. Pipeline Hibrid de Decizie
-    rule_result = evaluate_suricata_rules(data)
+            # 2. Extragem trăsăturile cerute de modelul activ
+            row_values = []
+            for feat in features:
+                # Căutăm trăsătura direct în corpul cererii sau în cheile alternative
+                val = data.get(feat, data.get(feat.strip(), 0.0))
+                try:
+                    row_values.append(float(val))
+                except (ValueError, TypeError):
+                    row_values.append(0.0)
 
-    if not rule_result.get("needs_ml", True):
-        rule_name = rule_result.get("signature", "MATCHED_RULE")
-        rule_score = rule_result.get("score", 0.8)
-        ml_score, is_anomaly, _ = evaluate_ml_flow(data)
-        final_risk = round(max(rule_score, ml_score), 2)
-        severity = 'CRITICAL' if final_risk >= 0.85 else 'HIGH'
-    else:
-        ml_score, is_anomaly, _ = evaluate_ml_flow(data)
-        rule_name = "CLEAN (SURICATA_PASSED)"
-        rule_score = 0.0
-        final_risk = round(ml_score, 2)
-        severity = 'HIGH' if is_anomaly else 'LOW'
+            # Facem scalarea și inferența
+            X_input = scaler.transform([row_values])
+            prediction = int(model.predict(X_input)[0])
+            probability = float(model.predict_proba(X_input)[0][1])
 
-    # 2. Obiecte Django în memorie
-    flow = NetworkFlow(
-        src_ip=data.get('src_ip', '127.0.0.1'),
-        dst_ip=data.get('dst_ip', '127.0.0.1'),
-        src_port=int(data.get('src_port', 0)),
-        dst_port=int(data.get('dst_port', 0)),
-        protocol=data.get('protocol', 'TCP'),
-        flow_duration=float(data.get('flow_duration', 0.0)),
-        total_fwd_packets=int(data.get('total_fwd_packets', 0)),
-        total_bwd_packets=int(data.get('total_bwd_packets', 0)),
-        flow_bytes_per_sec=float(data.get('flow_bytes_per_sec', 0.0)),
-        flow_packets_per_sec=float(data.get('flow_packets_per_sec', 0.0))
-    )
-
-    alert = SecurityAlert(
-        flow=flow,
-        rule_name=rule_name,
-        rule_score=rule_score,
-        anomaly_score=ml_score,
-        final_risk=final_risk,
-        severity=severity
-    )
-
-    # 3. Adăugare în buffer-ul de lot
-    with _buffer_lock:
-        _flow_buffer.append(flow)
-        _alert_buffer.append(alert)
-
-    # 4. Auto-Mitigare SOAR la prag critic (>= 0.90)
-    if final_risk >= 0.90:
-        if not BlockedIP.objects.filter(ip_address=flow.src_ip, is_active=True).exists():
-            BlockedIP.objects.create(
-                ip_address=flow.src_ip,
-                reason=f"Auto-Mitigare SOAR: Risc critic ({final_risk}) - {rule_name}",
-                expires_at=timezone.now() + timedelta(minutes=30),
-                is_active=True
-            )
-            SOARActionLog.objects.create(
-                action_type='FIREWALL_BLOCK',
-                target=flow.src_ip,
-                operator='SOAR Engine (Autonomous Playbook)',
-                details=f"Prag critic depășit ({final_risk}). IP izolat automat pentru 30 minute."
+            # 3. Salvăm în baza de date ca NetworkFlow
+            flow = NetworkFlow.objects.create(
+                src_ip=data.get('src_ip', '192.168.1.10'),
+                dst_ip=data.get('dst_ip', '172.16.0.5'),
+                src_port=int(data.get('src_port', 12345)),
+                dst_port=int(data.get('dst_port', data.get('Destination Port', 80))),
+                protocol=data.get('protocol', 'TCP'),
+                flow_duration=float(data.get('Flow Duration', data.get('flow_duration', 0.0))),
+                total_fwd_packets=int(data.get('Total Fwd Packets', data.get('total_fwd_packets', 1))),
+                total_bwd_packets=int(data.get('Total Backward Packets', data.get('total_bwd_packets', 0))),
+                flow_bytes_per_sec=float(data.get('Flow Bytes/s', data.get('flow_bytes_per_sec', 0.0))),
+                flow_packets_per_sec=float(data.get('Flow Packets/s', data.get('flow_packets_per_sec', 0.0)))
             )
 
-    # 5. Emitere instantanee prin WebSocket (Zero latență în UI)
-    channel_layer = get_channel_layer()
-    payload = {
-        'id': int(time.time() * 1000) % 100000,
-        'timestamp': timezone.now().strftime("%H:%M:%S"),
-        'src_ip': flow.src_ip,
-        'dst_ip': flow.dst_ip,
-        'dst_port': flow.dst_port,
-        'protocol': flow.protocol,
-        'rule': alert.rule_name,
-        'ml_score': alert.anomaly_score,
-        'final_risk': alert.final_risk,
-        'severity': alert.severity
-    }
-    async_to_sync(channel_layer.group_send)(
-        "soc_stream",
-        {"type": "send_alert", "payload": payload}
-    )
+            # 4. Generăm SecurityAlert dacă este detectat atac (prediction == 1 sau probabilitate mare)
+            alert_id = 0
+            severity = 'LOW'
+            if prediction == 1 or probability > 0.40:  # Prag calibrat pentru demontrare
+                severity = 'HIGH' if probability > 0.75 else 'MEDIUM'
+                alert = SecurityAlert.objects.create(
+                    flow=flow,
+                    rule_name=f"NIDS ML Detection ({mode.upper()})",
+                    severity=severity,
+                    final_risk=probability,
+                    anomaly_score=probability,
+                    suggested_action="BLOCK_IP" if probability > 0.75 else "MONITOR"
+                )
+                alert_id = alert.id
 
-    return JsonResponse({
-        'status': 'processed',
-        'final_risk': final_risk,
-        'severity': severity
-    })
+            return JsonResponse({
+                'status': 'success',
+                'mode_used': mode,
+                'prediction': prediction,
+                'probability': probability,
+                'final_risk': probability,
+                'severity': severity,
+                'alert_id': alert_id
+            })
+        except Exception as e:
+            return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
+    return JsonResponse({'status': 'error', 'message': 'Metodă invalidă'}, status=405)
 
 
 
@@ -812,3 +791,101 @@ def sandbox_view(request):
     return render(request, 'soc/sandbox.html', {
         'artifacts': artifacts
     })
+
+
+import json
+import os
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+
+# Calea directă către folderul artifacts (un nivel mai sus de soc_core)
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_PLATFORM_DIR = os.path.dirname(CURRENT_DIR)
+ARTIFACTS_DIR = os.path.join(BASE_PLATFORM_DIR, 'artifacts')
+REPORTS_DIR = os.path.join(BASE_PLATFORM_DIR, 'reports')
+ACTIVE_CONFIG_PATH = os.path.join(ARTIFACTS_DIR, 'active_model_config.json')
+
+
+def get_active_model_profile():
+    if os.path.exists(ACTIVE_CONFIG_PATH):
+        try:
+            with open(ACTIVE_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('active_mode', 'research')
+        except Exception:
+            pass
+    return 'research'
+
+
+@csrf_exempt
+def switch_active_model_api(request):
+    """API apelat din UI pentru citirea și comutarea profilului de detecție."""
+    # Asigură existența directorului artifacts
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+
+    if request.method == 'POST':
+        try:
+            raw_body = request.body.decode('utf-8') if request.body else "{}"
+            body = json.loads(raw_body)
+            new_mode = body.get('mode', 'research')
+
+            if new_mode not in ['baseline', 'research']:
+                return JsonResponse({'status': 'error', 'message': f'Mod invalid: {new_mode}'}, status=400)
+
+            with open(ACTIVE_CONFIG_PATH, 'w', encoding='utf-8') as f:
+                json.dump({'active_mode': new_mode}, f, indent=2)
+
+            return JsonResponse({
+                'status': 'success',
+                'active_mode': new_mode,
+                'message': f'Modelul activ a fost comutat la: {new_mode.upper()}'
+            })
+        except Exception as e:
+            return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+    # Răspuns pentru cererile GET
+    mode = get_active_model_profile()
+    comp_file = os.path.join(REPORTS_DIR, 'model_comparison.json')
+    comp_data = {}
+    if os.path.exists(comp_file):
+        try:
+            with open(comp_file, 'r', encoding='utf-8') as f:
+                comp_data = json.load(f)
+        except Exception:
+            pass
+
+    return JsonResponse({
+        'status': 'success',
+        'active_mode': mode,
+        'metrics': comp_data.get(mode, {}),
+        'comparison': comp_data
+    })
+
+
+def load_active_nids_components():
+    """Încarcă dinamic modelul, scaler-ul și features în funcție de profilul selectat în UI (research vs baseline)."""
+    mode = get_active_model_profile()
+
+    if mode == 'research':
+        m_path = os.path.join(ARTIFACTS_DIR, 'nids_model_research.joblib')
+        s_path = os.path.join(ARTIFACTS_DIR, 'scaler_research.joblib')
+        f_path = os.path.join(ARTIFACTS_DIR, 'selected_features_research.json')
+    else:
+        m_path = os.path.join(ARTIFACTS_DIR, 'nids_model_baseline.joblib')
+        s_path = os.path.join(ARTIFACTS_DIR, 'scaler_baseline.joblib')
+        f_path = os.path.join(ARTIFACTS_DIR, 'selected_features_baseline.json')
+
+    # Fallback dacă fișierele specifice modului lipsesc
+    if not os.path.exists(m_path):
+        m_path = MODEL_PATH
+        s_path = SCALER_PATH
+        f_path = FEATURES_PATH
+
+    model = joblib.load(m_path)
+    scaler = joblib.load(s_path)
+
+    with open(f_path, 'r', encoding='utf-8-sig') as f:
+        data = json.load(f)
+        features = data.get('features', data) if isinstance(data, dict) else data
+
+    return model, scaler, features, mode
